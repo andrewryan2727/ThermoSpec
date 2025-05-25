@@ -5,7 +5,7 @@ from scipy.linalg import solve_banded
 from config import SimulationConfig
 from grid import LayerGrid
 from stencils import build_bvp_stencil, build_jacobian_vis_banded, build_jacobian_therm_banded
-from bvp_solvers import solve_bvp_1, solve_bvp_2layer
+from bvp_solvers import solve_bvp_vis, solve_bvp_therm
 
 # -----------------------------------------------------------------------------
 # File: rte.py
@@ -27,10 +27,13 @@ class RadiativeTransfer:
         self.custom_bvp = config.custom_bvp
 
         # Precompute stencil and Jacobians
-        self.A_im1, self.A_i, self.A_ip1, self.h0, self.hN = build_bvp_stencil(grid.x, grid.nlay_dust)
+        if config.single_layer:
+            self.A_im1, self.A_i, self.A_ip1, self.h0, self.hN = build_bvp_stencil(grid.x, grid.nlay_dust)
+        else:
+            self.A_im1, self.A_i, self.A_ip1, self.h0, self.hN = build_bvp_stencil(grid.x, grid.nlay_dust)
         A = (self.A_im1, self.A_i, self.A_ip1)
         self.J_vis_ab   = build_jacobian_vis_banded((self.A_im1, self.A_i, self.A_ip1, self.h0, self.hN), config.gamma_vis)
-        self.J_therm_ab = build_jacobian_therm_banded((self.A_im1, self.A_i, self.A_ip1, self.h0, self.hN), config.gamma_therm)
+        self.J_therm_ab = build_jacobian_therm_banded((self.A_im1, self.A_i, self.A_ip1, self.h0, self.hN), config.gamma_therm, config.single_layer)
         self.A_bvp = A
 
         # Previous solutions
@@ -44,9 +47,8 @@ class RadiativeTransfer:
         x = self.grid.x_RTE
         if self.custom_bvp:
             u0 = self.phi_vis_prev.copy()
-            dF = 4.0*(self.cfg.gamma_vis**2)
-            self.phi_vis_prev = solve_bvp_1(
-                x, self._vis_fun, u0, dF,
+            self.phi_vis_prev = solve_bvp_vis(
+                x, self._vis_fun, u0,
                 self.J_vis_ab, self.A_bvp, self.h0, self.hN, T,
                 tol=self.cfg.bvp_tol, max_iter=self.cfg.bvp_max_iter
             )
@@ -61,13 +63,17 @@ class RadiativeTransfer:
         x = self.grid.x_RTE
         if self.custom_bvp:
             u0 = self.phi_therm_prev.copy()
-            if(F>0):
-                D = -self.cfg.sigma/np.pi * T[self.grid.nlay_dust]**4 + self.phi_vis_prev[-1] + self.cfg.J*np.exp(-self.cfg.eta*x[-1]/mu)/(4*np.pi)
+            if self.cfg.single_layer:
+                # Use Dirichlet boundary condition for single-layer. Heat flux is balanced at bottom boundary. 
+                D = -self.cfg.sigma/np.pi * T[-1]**4
             else:
-                D = -self.cfg.sigma/np.pi * T[self.grid.nlay_dust]**4
-            dF = 4.0*(self.cfg.gamma_therm**2)
-            self.phi_therm_prev = solve_bvp_2layer(
-                x, self._therm_fun, u0, dF,
+                # Use Dirichlet boundary condition for two-layer
+                if(F>0):
+                    D = -self.cfg.sigma/np.pi * T[self.grid.nlay_dust]**4 + self.phi_vis_prev[-1] + self.cfg.J*np.exp(-self.cfg.eta*x[-1]/mu)/(4*np.pi)
+                else:
+                    D = -self.cfg.sigma/np.pi * T[self.grid.nlay_dust]**4
+            self.phi_therm_prev = solve_bvp_therm(
+                x, self._therm_fun, u0,
                 self.J_therm_ab, self.A_bvp,
                 self.h0, self.hN, D,T,
                 tol=self.cfg.bvp_tol, max_iter=self.cfg.bvp_max_iter
@@ -96,11 +102,17 @@ class RadiativeTransfer:
           self.phi_vis_prev = np.zeros(len(self.grid.x_RTE))
         #Thermal RTE source
         phi_therm = self.solve_thermal(T, mu, F)
-        # Obtain second derivative
-        _, d2 = self._therm_fun(self.grid.x_RTE, (phi_therm, 0.0), T[1:self.grid.nlay_dust+1])
+        # Obtain second derivative - use appropriate temperature range based on mode
+        if self.cfg.single_layer:
+            _, d2 = self._therm_fun(self.grid.x_RTE, (phi_therm, 0.0), T[1:-1])
+        else:
+            _, d2 = self._therm_fun(self.grid.x_RTE, (phi_therm, 0.0), T[1:self.grid.nlay_dust+1])
         source_therm = np.pi * self.cfg.q * d2
         source = np.zeros(self.grid.x_num)
-        source[1:self.grid.nlay_dust+1] = source_vis + source_therm
+        if self.cfg.single_layer:
+            source[1:-1] = source_vis + source_therm
+        else:
+            source[1:self.grid.nlay_dust+1] = source_vis + source_therm
         source = source*self.grid.K
         return source
 

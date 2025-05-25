@@ -14,7 +14,7 @@
 #Note that these boundary problems are specifically designed for the Hapke RTE model.
 # They are not general-purpose solvers.
 
-def solve_bvp_1(x, Fun, u, dF, J, A,h0,hN,T,tol=1e-8, max_iter=50):
+def solve_bvp_vis(x, Fun, u, J, A,h0,hN,T,tol=1e-8, max_iter=50):
     # Boundary value solver specifically for the visible RTE
     # Also could be used for thermal RTE in single-layer scenario. 
     # Boundary conditions are baked in! 
@@ -25,7 +25,6 @@ def solve_bvp_1(x, Fun, u, dF, J, A,h0,hN,T,tol=1e-8, max_iter=50):
     # x  : node positions, normally x_RTE in main code. 
     # Fun: function F(u)
     # u  : initial guess for u
-    # dF : constant val (derivative of function F)
     # J  : Jacobian
     # A  : central difference stencil (3 elements)
     # h0 : Thickness of top layer
@@ -42,7 +41,7 @@ def solve_bvp_1(x, Fun, u, dF, J, A,h0,hN,T,tol=1e-8, max_iter=50):
         # boundary at i=0:  (2h+1) u0 - u1 = 0
         R[0] = (2*h0 + 1)*u[0] - u[1]
         # interior i=1..N-1
-        R[1:N] =  A1*u[0:N-1] + A2*u[1:N] + A3*u[2:N+1] - Fun(x[1:-1],(u[1:-1],u[1:-1]),T)[1]
+        R[1:N] =  A1*u[0:N-1] + A2*u[1:N] + A3*u[2:N+1] - Fun(x[1:-1],(u[1:-1],u[1:-1]),T[2:N+1])[1]
         # boundary at i=N: -u[N-1] + (2h+1) u[N] = 0
         R[N] = -u[N-1] + (2*hN + 1)*u[N]
 
@@ -64,7 +63,7 @@ def solve_bvp_1(x, Fun, u, dF, J, A,h0,hN,T,tol=1e-8, max_iter=50):
 
     return u
 
-def solve_bvp_2layer(x, Fun, u, dF, J, A,h0,hN,D,T,tol=1e-8, max_iter=50):
+def solve_bvp_therm(x, Fun, u, J, A,h0,hN,D,T,tol=1e-8, max_iter=50):
     # Boundary value solver specifically for the thermal RTE in the two-layer scenario. 
     # Boundary conditions are baked in!   
     # Solve u'' = F(u), 0<=x<=L, with boundary conditions:
@@ -73,7 +72,6 @@ def solve_bvp_2layer(x, Fun, u, dF, J, A,h0,hN,D,T,tol=1e-8, max_iter=50):
     # Specifically designed for two layer thermal RTE. 
     # x  : node positions, normally x_RTE in main code. 
     # Fun: function F(u)
-    # dF : constant val (derivative of function F)
     # J  : Jacobian
     # A  : central difference stencil (3 elements)
     # h0 : Thickness of top layer

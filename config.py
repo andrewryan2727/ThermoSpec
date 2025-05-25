@@ -41,13 +41,14 @@ class SimulationConfig:
 
     # Boundary & layer settings
     T_bottom: float = 260.         # bottom boundary and global initialization temperature (K)
-    dust_thickness: float = 10e-5    # dust layer thickness (m)
+    dust_thickness: float = 0.03    # dust layer thickness (m)
     rock_thickness: float = 0.45     # rock substrate thickness (m)
     dust_lthick: float = 0.02        # dust node spacing (tau units, i.e., optical opacity!)
     rock_lthick: float = 0.0005      # rock node spacing (m)
 
     # Simulation flags and convergence settings
-    use_RTE: bool = False             # use radiative transfer model
+    single_layer: bool = True        # use single-layer model instead of two-layer
+    use_RTE: bool = True             # use radiative transfer model
     bottom_bc: str = 'neumann'     # bottom boundary condition choices: "neumann" (zero‐flux), "dirichlet" (fixed T_bottom)
     sun: bool = True                 # include solar input
     diurnal: bool = True             # include diurnal variation
