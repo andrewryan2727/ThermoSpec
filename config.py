@@ -41,10 +41,12 @@ class SimulationConfig:
 
     # Boundary & layer settings
     T_bottom: float = 260.         # bottom boundary and global initialization temperature (K)
-    dust_thickness: float = 0.03    # dust layer thickness (m)
-    rock_thickness: float = 0.45     # rock substrate thickness (m)
+    dust_thickness: float = 0.2    # dust column total thickness (m)
+    rock_thickness: float = 0.45     # rock substrate column total thickness (m)
     dust_lthick: float = 0.02        # dust node spacing (tau units, i.e., optical opacity!)
     rock_lthick: float = 0.0005      # rock node spacing (m)
+    geometric_spacing: bool = True  # Node spacing increases by factor spacing_factor, otherwise constant thickness. Only applies to single layer scenario. 
+    spacing_factor: float = 1.05     # layer thickness increase factor for geometric spacing. Only applies to single layer scenario!
 
     # Simulation flags and convergence settings
     single_layer: bool = True        # use single-layer model instead of two-layer
@@ -59,7 +61,7 @@ class SimulationConfig:
     T_surf_max_iter: int = 50       # max iterations for surface temperature convergence
 
     # Time-stepping parameters
-    tsteps_day: int = 8000           # time steps per day
+    tsteps_day: int = 8000          # time steps per day
     ndays: int = 5                  # total simulation days
 
 
@@ -79,7 +81,7 @@ class SimulationConfig:
         self.J = 1366.0 / (self.R ** 2.0)
         # Radiative ratio q
         self.q = 1.0 / (self.k_dust * self.Et)
-        if(self.k_dust_auto):
+        if(self.k_dust_auto and not self.use_RTE):
             #Add the estimation for the radiative term from Hapke's book, equation 16.31. 
             self.k_dust += (4.0/self.Et)*self.sigma*self.T_bottom**3.
             print(f"Using auto-calculated dust thermal conductivity: {self.k_dust:.2e} W/m/K")

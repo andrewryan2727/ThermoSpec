@@ -28,27 +28,48 @@ class LayerGrid:
         cfg = self.config
         if cfg.single_layer:
             # Single layer case - use dust properties for everything
-            dust_tau = cfg.dust_thickness * cfg.Et
-            nlay_dust_init = int(round(dust_tau / cfg.dust_lthick))
-            # revise actual layer thickness to match integer layer count
-            cfg.dust_lthick = dust_tau / nlay_dust_init
-            self.nlay_dust = nlay_dust_init 
-            
-            # Total nodes (including virtual top/bottom)
-            x_num = self.nlay_dust + 2
-            x = np.zeros(x_num)
-            
-            # Virtual top node and first real node
-            x[0] = -cfg.dust_lthick / 2.0
-            x[1] = cfg.dust_lthick / 2.0
-            
-            # Remaining nodes
-            for i in range(2, self.nlay_dust):
-                x[i] = x[i-1] + cfg.dust_lthick
+            if(cfg.geometric_spacing):
+                #Spacing increases by geometric factor spacing_factor
+                s = cfg.dust_lthick  #first layer spacing, tau units. 
+                L = cfg.dust_thickness * cfg.Et #Total dust column thickness, converted to tau units
+                x_nodes = [-cfg.dust_lthick/2.] #virtual node. 
 
-            #Ensure last real node is in the correct position, accouting for changes due to rounding in conversion from m to tau. 
-            x[-2] = cfg.dust_thickness * cfg.Et - cfg.dust_lthick / 2.0
-            x[-1] = x[-2] + cfg.dust_lthick
+
+                # keep adding nodes until the next would go past L
+                while x_nodes[-1] + s < L:
+                    x_nodes.append(x_nodes[-1] + s)
+                    s *= cfg.spacing_factor  # increase spacing by factor
+
+                last = L + (L - x_nodes[-1])
+                x_nodes.append(last)
+   
+                x = np.array(x_nodes)
+                x_num = len(x)
+                self.nlay_dust = x_num-2  # For RTE, exclude virtual top/bottom nodes
+
+            else:
+                # Uniform layer thickness. 
+                dust_tau = cfg.dust_thickness * cfg.Et
+                nlay_dust_init = int(round(dust_tau / cfg.dust_lthick))
+                # revise actual layer thickness to match integer layer count
+                cfg.dust_lthick = dust_tau / nlay_dust_init
+                self.nlay_dust = nlay_dust_init 
+                
+                # Total nodes (including virtual top/bottom)
+                x_num = self.nlay_dust + 2
+                x = np.zeros(x_num)
+                
+                # Virtual top node and first real node
+                x[0] = -cfg.dust_lthick / 2.0
+                x[1] = cfg.dust_lthick / 2.0
+                
+                # Remaining nodes
+                for i in range(2, self.nlay_dust):
+                    x[i] = x[i-1] + cfg.dust_lthick
+
+                #Ensure last real node is in the correct position, accouting for changes due to rounding in conversion from m to tau. 
+                x[-2] = cfg.dust_thickness * cfg.Et - cfg.dust_lthick / 2.0
+                x[-1] = x[-2] + cfg.dust_lthick
 
         else:
             # Calculate dust layer thicknesses in terms of optical depth tau
