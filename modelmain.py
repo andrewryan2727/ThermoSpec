@@ -153,8 +153,8 @@ class Simulator:
 			self.phi_therm_out[:, j] = self.rte.phi_therm_prev.copy()
 			self.T_surf_out[j] = self.T_surf
 			# Progress update
-			if j % 1000 == 0:
-				print(f"Time step {j}/{self.t_num}")
+			#if j % 1000 == 0:
+			#	print(f"Time step {j}/{self.t_num}")
 		elapsed = time.time() - start_time
 		print(f"Simulation completed in {elapsed:.2f} s")
 		return self.T_out, self.phi_vis_out, self.phi_therm_out, self.T_surf_out
@@ -166,8 +166,10 @@ if __name__ == "__main__":
 
 	# Plot temperature at the surface (first grid point) over time
 	plt.figure(figsize=(10, 5))
-	plt.plot(sim.t / 3600, T_out[1, :], label='Surface Temperature')
-	plt.plot(sim.t / 3600, T_surf_out, label='Surface Temperature (no RTE)')
+	if(sim.cfg.use_RTE):
+		plt.plot(sim.t / 3600, T_out[1, :], label='Surface Temperature')
+	else:
+		plt.plot(sim.t / 3600, T_surf_out, label='Surface Temperature (no RTE)')
 	plt.xlabel('Time (hours)')
 	plt.ylabel('Temperature (K)')
 	plt.title('Surface Temperature vs Time')

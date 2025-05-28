@@ -82,7 +82,7 @@ class LayerGrid:
             # Rock layer count and thickness in tau units
             nlay_rock = int(round(cfg.rock_thickness / cfg.rock_lthick))
             rock_tau = cfg.rock_thickness * cfg.Et
-            cfg.rock_lthick = rock_tau / nlay_rock
+            rock_lthick_tau = rock_tau / nlay_rock
             self.nlay_rock = nlay_rock
 
             # Total nodes (including virtual top/bottom)
@@ -100,15 +100,15 @@ class LayerGrid:
 
             # First two rock nodes
             x[self.nlay_dust+1] = 2.0*x[self.nlay_dust] - x[self.nlay_dust-1]
-            x[self.nlay_dust+2] = x[self.nlay_dust+1] + 0.5*cfg.dust_lthick + 0.5*cfg.rock_lthick
+            x[self.nlay_dust+2] = x[self.nlay_dust+1] + 0.5*cfg.dust_lthick + 0.5*rock_lthick_tau
             # Remaining rock layers
             for i in range(self.nlay_dust+3, self.nlay_dust + self.nlay_rock + 3):
-                x[i] = x[i-1] + cfg.rock_lthick
+                x[i] = x[i-1] + rock_lthick_tau
 
             # Adjust bottom nodes exactly
             x[-2] = (cfg.dust_thickness + cfg.rock_thickness) * cfg.Et
             if x[-1] < x[-2]:
-                x[-1] = x[-2] + cfg.rock_lthick
+                x[-1] = x[-2] + rock_lthick_tau
 
         # Store coordinates and counts
         self.x = x

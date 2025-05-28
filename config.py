@@ -20,49 +20,49 @@ class SimulationConfig:
     gamma_therm: float = 0.9         # thermal albedo factor
     Et: float = 7000.0               # thermal extinction coefficient (m^-1)
     eta: float = 1.0                 # visible/thermal extinction ratio 
-    em: float = 0.95                 # thermal emissivity, ONLY USED FOR NON-RTE MODELS
-    albedo: float = 0.02              # surface albedo, ONLY USED FOR NON-RTE MODELS   
+    em: float = 0.90                 # thermal emissivity, ONLY USED FOR NON-RTE MODELS
+    albedo: float = 0.0178              # surface albedo, ONLY USED FOR NON-RTE MODELS   
 
     # Orbital & rotational parameters
-    R: float = 1.0                   # heliocentric distance (AU)
-    latitude: float = 55.0 * np.pi/180.0  # latitude (rad)
-    P: float = 4.293057 * 3600.0        #Rotational period in s
+    R: float = 1.2447                   # heliocentric distance (AU)
+    latitude: float = 34.6 * np.pi/180.0  # latitude (rad)
+    P: float = 7.632622 * 3600.0        #Rotational period in s
 
     # Dust (or top layer) material properties
-    k_dust: float = 5.5e-4           # dust thermal conductivity (W/m/K). If using RTE model, this should just be phonon conduction. 
-    rho_dust: float = 1100.0         # dust bulk density (kg/m^3)
-    cp_dust: float = 775.0           # dust specific heat (J/kg/K)
-    k_dust_auto: bool = True  # use auto-calculated dust thermal conductivity for non-RTE models. If False, use k_dust value directly.
+    k_dust: float = 0.0025           # dust thermal conductivity (W/m/K). If using RTE model, this should just be phonon conduction. 5.5e-4
+    rho_dust: float = 366.0         # dust bulk density (kg/m^3)
+    cp_dust: float = 700.0           # dust specific heat (J/kg/K)
+    k_dust_auto: bool = False  # use auto-calculated dust thermal conductivity for non-RTE models. If False, use k_dust value directly.
 
     # Rock (or substrate) material properties
-    k_rock: float = 0.5              # rock thermal conductivity (W/m/K)
-    rho_rock: float = 1700.0         # rock density (kg/m^3)
-    cp_rock: float = 775.0           # rock heat capacity (J/kg/K)
+    k_rock: float = 1.0              # rock thermal conductivity (W/m/K)
+    rho_rock: float = 2000.0         # rock density (kg/m^3)
+    cp_rock: float = 700.0           # rock heat capacity (J/kg/K)
 
     # Boundary & layer settings
-    T_bottom: float = 260.         # bottom boundary and global initialization temperature (K)
-    dust_thickness: float = 0.2    # dust column total thickness (m)
-    rock_thickness: float = 0.45     # rock substrate column total thickness (m)
+    T_bottom: float = 250.         # bottom boundary and global initialization temperature (K)
+    dust_thickness: float = 10.0e-6    # dust column total thickness (m)
+    rock_thickness: float = 0.50     # rock substrate column total thickness (m)
     dust_lthick: float = 0.02        # dust node spacing (tau units, i.e., optical opacity!)
-    rock_lthick: float = 0.0005      # rock node spacing (m)
+    rock_lthick: float = 0.0025      # rock node spacing (m)
     geometric_spacing: bool = True  # Node spacing increases by factor spacing_factor, otherwise constant thickness. Only applies to single layer scenario. 
     spacing_factor: float = 1.05     # layer thickness increase factor for geometric spacing. Only applies to single layer scenario!
 
     # Simulation flags and convergence settings
-    single_layer: bool = True        # use single-layer model instead of two-layer
-    use_RTE: bool = True             # use radiative transfer model
-    bottom_bc: str = 'neumann'     # bottom boundary condition choices: "neumann" (zero‐flux), "dirichlet" (fixed T_bottom)
+    single_layer: bool = False        # use single-layer model instead of two-layer
+    use_RTE: bool = False             # use radiative transfer model
+    bottom_bc: str = 'neumann'       # bottom boundary condition choices: "neumann" (zero‐flux), "dirichlet" (fixed T_bottom)
     sun: bool = True                 # include solar input
-    diurnal: bool = True             # include diurnal variation
+    diurnal: bool = True             # include diurnal variation. If false, model is steady-state. 
     custom_bvp: bool = True          # use the custom written bvp solver for RTE. Otherwise, reverts to scipy.solve_bvp
     bvp_tol: float = 1.0e-8          # tolerance for BVP solver
     bvp_max_iter: float = 1000       # max iterations for BVP solver
-    T_surf_tol: float = 1.0e-4      # tolerance for surface temperature convergence
-    T_surf_max_iter: int = 50       # max iterations for surface temperature convergence
+    T_surf_tol: float = 1.0e-4       # tolerance for surface temperature convergence
+    T_surf_max_iter: int = 50        # max iterations for surface temperature convergence
 
     # Time-stepping parameters
-    tsteps_day: int = 8000          # time steps per day
-    ndays: int = 5                  # total simulation days
+    tsteps_day: int = 15000          # time steps per day
+    ndays: int = 3                  # total simulation days
 
 
     # Physical constants
