@@ -76,8 +76,13 @@ class LayerGrid:
             dust_tau = cfg.dust_thickness * cfg.Et
             nlay_dust_init = int(round(dust_tau / cfg.dust_lthick))
             # revise actual layer thickness to match integer layer count
-            cfg.dust_lthick = dust_tau / nlay_dust_init
+            dust_lthick = dust_tau / nlay_dust_init
             self.nlay_dust = nlay_dust_init + 1
+
+            # Ensure minimum dust layer count
+            if(self.nlay_dust < 15):
+                dust_lthick = dust_tau / 15.0
+                self.nlay_dust = 16
 
             # Rock layer count and thickness in tau units
             nlay_rock = int(round(cfg.rock_thickness / cfg.rock_lthick))
@@ -90,17 +95,17 @@ class LayerGrid:
             x = np.zeros(x_num)
 
             # Virtual top node and first real node in dust
-            x[0] = -cfg.dust_lthick / 2.0
-            x[1] = cfg.dust_lthick / 2.0
+            x[0] = -dust_lthick / 2.0
+            x[1] = dust_lthick / 2.0
             for i in range(2, self.nlay_dust):
-                x[i] = x[i-1] + cfg.dust_lthick
+                x[i] = x[i-1] + dust_lthick
             
             # Node at dust/rock interface
             x[self.nlay_dust] = cfg.dust_thickness * cfg.Et
 
             # First two rock nodes
             x[self.nlay_dust+1] = 2.0*x[self.nlay_dust] - x[self.nlay_dust-1]
-            x[self.nlay_dust+2] = x[self.nlay_dust+1] + 0.5*cfg.dust_lthick + 0.5*rock_lthick_tau
+            x[self.nlay_dust+2] = x[self.nlay_dust+1] + 0.5*dust_lthick + 0.5*rock_lthick_tau
             # Remaining rock layers
             for i in range(self.nlay_dust+3, self.nlay_dust + self.nlay_rock + 3):
                 x[i] = x[i-1] + rock_lthick_tau

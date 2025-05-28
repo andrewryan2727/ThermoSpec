@@ -61,8 +61,8 @@ class SimulationConfig:
     T_surf_max_iter: int = 50        # max iterations for surface temperature convergence
 
     # Time-stepping parameters
-    tsteps_day: int = 15000          # time steps per day
-    ndays: int = 3                  # total simulation days
+    tsteps_day: int = 40000          # time steps per day
+    ndays: int = 5                  # total simulation days
 
 
     # Physical constants
