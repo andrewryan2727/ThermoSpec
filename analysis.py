@@ -20,6 +20,7 @@ def build_single_layer_lookup(k_dust_values, base_config=None):
         # Create a fresh copy of the configuration for each run
         cfg = deepcopy(base_config)
         cfg.k_dust = k_dust
+        print(f"Building single-layer lookup for k_dust={k_dust:.4e} W/m/K")
         # Force recalculation of derived values by calling post_init
         cfg.__post_init__()
         
@@ -27,10 +28,26 @@ def build_single_layer_lookup(k_dust_values, base_config=None):
         sim = Simulator(cfg)
         T_out, _, phi_th, T_surf, t_out = sim.run()
         
+        # Calculate emission temperature if using RTE
+        if cfg.use_RTE:
+            # x_RTE is already in tau units (optical depth)
+            tau = sim.grid.x_RTE
+            
+            # Calculate emission temperature at each time point
+            n_times = T_out.shape[1]
+            emissT = np.zeros(n_times)
+            for i in range(n_times):
+                # Use temperature profile in dust layers only
+                T_profile = T_out[1:sim.grid.nlay_dust+1, i]
+                emissT[i] = emissionT(T_profile, tau)
+        else:
+            emissT = None
+            
         results[k_dust] = {
             'T_out': T_out,
             'phi_therm_out': phi_th,
             'T_surf': T_surf,
+            'emissT': emissT,  # Will be None for non-RTE cases
             'lut_times': t_out
         }
     return results
@@ -152,79 +169,109 @@ def find_best_fit_k_dust(modelT, single_layer_lookup, temps_key='T_surf', start_
 
 def emissionT(T,tau,mu=1.0):
     # Calculate effective emission temperature from radiative flux.
-    # T is the temperature profile, tau is the optical depth profile, mu is the cosine of the emission angle (observer). 
-	T_calc = 0.0
-	wt_calc = 0.0
-	for i in np.arange(len(T)):
-		T_calc += (T[i]**4.0)*np.exp(-tau[i]/mu)
-		wt_calc += np.exp(-tau[i]/mu)
-	T_calc = T_calc/wt_calc
-	return(T_calc**0.25)
+    # T is the temperature profile
+    # tau is the optical depth profile (already in tau units)
+    # mu is the cosine of the emission angle (observer)
+    T_calc = 0.0
+    wt_calc = 0.0
+    for i in np.arange(len(T)):
+        T_calc += (T[i]**4.0)*np.exp(-tau[i]/mu)
+        wt_calc += np.exp(-tau[i]/mu)
+    T_calc = T_calc/wt_calc
+    return(T_calc**0.25)
 
-def analyze_two_layer_equivalence(dust_thickness_values, k_dust_values=None, temps_key='T_surf'):
-    """Analyze equivalent single-layer k_dust for different two-layer dust thicknesses."""
+def analyze_two_layer_equivalence(dust_thickness_values, k_dust_values=None, lut_temps_key=None, model_temps_key=None):
+    """Analyze equivalent single-layer k_dust for different two-layer dust thicknesses.
+    
+    Args:
+        dust_thickness_values: Array of dust thicknesses to analyze
+        k_dust_values: Array of k_dust values for lookup table (optional)
+        lut_temps_key: Temperature type to use from lookup table ('T_surf' or 'emissT')
+        model_temps_key: Temperature type to use from two-layer model ('T_surf' or 'emissT')
+    """
     if k_dust_values is None:
         k_dust_values = np.logspace(-4, -1, 20)  # 20 values from 1e-4 to 1e-1
     
     # Set up configurations
     two_layer_cfg = SimulationConfig()
-    two_layer_cfg.use_RTE = False
+    single_layer_cfg = SimulationConfig()
+
+    # Configure RTE modes based on temperature types
+    if model_temps_key == 'emissT':
+        two_layer_cfg.use_RTE = True
+    elif model_temps_key == 'T_surf':
+        two_layer_cfg.use_RTE = False
+    else:
+        # Default to RTE off if not specified
+        two_layer_cfg.use_RTE = False
+        model_temps_key = 'T_surf'
+
+    if lut_temps_key == 'emissT':
+        single_layer_cfg.use_RTE = True
+    elif lut_temps_key == 'T_surf':
+        single_layer_cfg.use_RTE = False
+    else:
+        # Match two-layer configuration if not specified
+        single_layer_cfg.use_RTE = two_layer_cfg.use_RTE
+        lut_temps_key = model_temps_key
+
+    # Basic configuration
     two_layer_cfg.single_layer = False
     two_layer_cfg.ndays = 5
     
-    single_layer_cfg = SimulationConfig()
-    single_layer_cfg.use_RTE = False
     single_layer_cfg.single_layer = True
     single_layer_cfg.dust_thickness = 0.50  # m, Default thickness for single-layer model
     single_layer_cfg.ndays = 5
     single_layer_cfg.k_dust_auto = False  # Use fixed k_dust values
     single_layer_cfg.rho_dust = two_layer_cfg.rho_rock  # Use same density as two-layer model
     single_layer_cfg.cp_dust = two_layer_cfg.cp_rock  # Use same specific heat as two-layer model
-
-    if(single_layer_cfg.use_RTE):
-         lut_temps_key = 'emissT'
-    else:
-         lut_temps_key = 'T_surf'
     
     # Build single-layer lookup table
-    print("Building single-layer lookup table...")
-    #This returns a table of temperature profiles for different k_dust values (last diurnal cycle only)
+    print(f"Building single-layer lookup table (RTE={single_layer_cfg.use_RTE})...")
     single_layer_lookup = build_single_layer_lookup(k_dust_values, single_layer_cfg)
     single_layer_lookup['k_dust'] = np.log10(k_dust_values)
-    temps = np.array([single_layer_lookup[k][temps_key] for k in k_dust_values])
+    
+    # Get temperature data for interpolation
+    temps = []
+    for k in k_dust_values:
+        if lut_temps_key not in single_layer_lookup[k]:
+            raise ValueError(f"Temperature type '{lut_temps_key}' not available in lookup table. "
+                           f"Make sure RTE settings match requested temperature type.")
+        temps.append(single_layer_lookup[k][lut_temps_key])
+    temps = np.array(temps)
+    
+    # Process lookup table times
     lut_times = single_layer_lookup[k_dust_values[0]]['lut_times']
-    lut_times = (lut_times - np.min(lut_times)) / (np.max(lut_times) - np.min(lut_times))  # Normalize times to 0-1 range
-    #Make interpolator function. 
-    # lut_k_interp accepts log10(k_dust), outputs T_surf vs time. 
-    # lut_time_interp accepts time fraction (0.0 to 1.0), outputs T_surf values for all k_dust_values.
-    lut_k_interp, lut_time_interp  = interpolate_temps(single_layer_lookup, temps_key=lut_temps_key)
+    lut_times = (lut_times - np.min(lut_times)) / (np.max(lut_times) - np.min(lut_times))
+    
+    # Create interpolators
+    lut_k_interp, lut_time_interp = interpolate_temps(single_layer_lookup, temps_key=lut_temps_key)
 
-    #Pre-calculate LUT max and min temperature values and time at which max temperature occurs. 
+    # Store everything needed for interpolation in the lookup dictionary
+    single_layer_lookup['lut_times'] = lut_times
+    single_layer_lookup['lut_k_interp'] = lut_k_interp
+    single_layer_lookup['lut_time_interp'] = lut_time_interp
+
+    # Pre-calculate extrema
     nsolns = len(k_dust_values)
-    #lut_times = np.linspace(0.0, 1.0, single_layer_cfg.tsteps_day)
     lut_max_time = np.zeros(nsolns)
     lut_max_T = np.zeros(nsolns)
     lut_min_T = np.zeros(nsolns)
     idx1 = np.argmin(np.abs(lut_times-0.3))
     idx2 = np.argmin(np.abs(lut_times-0.7))
+    
     for i in np.arange(nsolns):
         lut_max_time[i] = find_max_time(temps[i,idx1:idx2],lut_times[idx1:idx2])
         lut_max_T[i] = lut_time_interp(lut_max_time[i])[i]
-        #lut_interp2 = interpolate.interp1d(lut_times,smooth_lut[i,0,:]*-1.0,axis=0,fill_value='extrapolate',kind='cubic')
-        #result = optimize.minimize_scalar(lut_interp2,bounds=(0.3,0.7),method='bounded')
-        #lut_max_time[i] = result.x
-        #lut_max_T[i] = -lut_interp2(result.x)
         lut_interp2 = interp1d(lut_times,temps[i,:],axis=0,fill_value='extrapolate',kind='cubic')
         result = minimize_scalar(lut_interp2,bounds=(0.0,0.3),method='bounded')
         lut_min_T[i] = lut_interp2(result.x)
     
-    # Add lut_max_time, lut_max_T, and lut_min_T to dictionary
-    single_layer_lookup['max_time'] = lut_max_time
-    single_layer_lookup['max_T'] = lut_max_T
-    single_layer_lookup['min_T'] = lut_min_T
-    single_layer_lookup['lut_times'] = lut_times
-    single_layer_lookup['lut_k_interp'] = lut_k_interp
-    single_layer_lookup['lut_time_interp'] = lut_time_interp
+    single_layer_lookup.update({
+        'max_time': lut_max_time,
+        'max_T': lut_max_T,
+        'min_T': lut_min_T
+    })
 
     results = {}
     import matplotlib.pyplot as plt
@@ -238,32 +285,41 @@ def analyze_two_layer_equivalence(dust_thickness_values, k_dust_values=None, tem
             # Run two-layer model
             two_layer_cfg.dust_thickness = dust_thickness
             sim = Simulator(two_layer_cfg)
-            T_out, _, phi_th, T_surf,_ = sim.run()
-
-            if(temps_key == 'T_surf'):
+            T_out, _, phi_th, T_surf, t_out = sim.run()
+            
+            # Calculate temperatures for comparison based on requested type
+            if model_temps_key == 'emissT':
+                if not two_layer_cfg.use_RTE:
+                    raise ValueError("Cannot get emission temperatures without RTE enabled")
+                tau = sim.grid.x_RTE  # Already in tau units
+                n_times = T_out.shape[1]
+                modelT = np.zeros(n_times)
+                for j in range(n_times):
+                    T_profile = T_out[1:sim.grid.nlay_dust+1, j]
+                    modelT[j] = emissionT(T_profile, tau)
+            else:  # T_surf
                 modelT = T_surf.copy()
-            else:
-                modelT = phi_T_surf(phi_th[0,:])
-
-            #tstart = int(sim.cfg.tsteps_day*(sim.cfg.ndays-1))
-            #modelT = modelT[tstart:]  # Use last day temperatures
-
+            
             # Find best fit
-            best_k_dust, error, best_temps = find_best_fit_k_dust(modelT, single_layer_lookup)
+            best_k_dust, error, best_temps = find_best_fit_k_dust(modelT, single_layer_lookup,
+                                                                temps_key=lut_temps_key)
             
             results[dust_thickness] = {
                 'best_k_dust': best_k_dust,
                 'error': error,
                 'thermal_inertia': np.sqrt(best_k_dust * single_layer_cfg.rho_dust * single_layer_cfg.cp_dust),
-                'temperatures': best_temps
+                'temperatures': best_temps,
+                'model_temps': modelT
             }
             
             # Plot comparison
             plt.subplot(3, 4, (i % 12) + 1)
-            plt.plot(sim.t_out / 3600, modelT, 'b-', label='Two-layer')
+            temp_type = 'Emission' if model_temps_key == 'emissT' else 'Surface'
+            plt.plot(sim.t_out / 3600, modelT, 'b-', 
+                    label=f'Two-layer {temp_type} T')
             plt.plot(sim.t_out / 3600, best_temps, 'r--', 
                     label=f'Single-layer (k={best_k_dust:.2e})')
-            plt.title(f'd={dust_thickness:.2e}m, TI={results[dust_thickness]["thermal_inertia"]:.1f}')
+            plt.title(f'd={dust_thickness:.2e}m\nTI={results[dust_thickness]["thermal_inertia"]:.1f}')
             if i % 12 == 0:
                 plt.legend()
             
@@ -281,7 +337,8 @@ if __name__ == "__main__":
                                     500.0e-6, 0.001, 0.002, 0.005, 0.01, 0.02])
     k_dust_values = np.logspace(-5, 0, 25)  # 25 values from 1e-5 to 1e0
     
-    results = analyze_two_layer_equivalence(dust_thickness_values, k_dust_values)
+    results = analyze_two_layer_equivalence(dust_thickness_values, k_dust_values, 
+                                            lut_temps_key='emissT', model_temps_key='emissT')
     
     # Plot summary of results
     import matplotlib.pyplot as plt

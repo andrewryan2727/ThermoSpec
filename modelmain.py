@@ -271,9 +271,10 @@ if __name__ == "__main__":
 	if(sim.cfg.use_RTE):
 		plt.plot(sim.t_out / 3600, (2.0*phi_therm[0,:]*np.pi/5.670e-8)**0.25, label='Phi temperature')
 		plt.plot(sim.t_out / 3600, T_out[1,:], label='Surface Temperature')
-		emissT = emissionT(T_out[1:sim.grid.nlay_dust+1,:],sim.grid.x[1:sim.grid.nlay_dust+1],1.0)
-		#for j in np.arange(len(sim.t_out)):
-		#	emissT[j] = emissionT(T_out[1:sim.grid.nlay_dust+1,j],sim.grid.x[1:sim.grid.nlay_dust+1],1.0)
+		#emissT = emissionT(T_out[1:sim.grid.nlay_dust+1,:],sim.grid.x[1:sim.grid.nlay_dust+1],1.0)
+		emissT = np.zeros(len(sim.t_out))
+		for j in np.arange(len(sim.t_out)):
+			emissT[j] = emissionT(T_out[1:sim.grid.nlay_dust+1,j],sim.grid.x[1:sim.grid.nlay_dust+1],1.0)
 		plt.plot(sim.t_out / 3600, emissT, label='Emission Temperature')
 	else:
 		plt.plot(sim.t_out / 3600, T_surf_out, label='Surface Temperature (no RTE)')
