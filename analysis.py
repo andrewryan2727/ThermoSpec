@@ -7,26 +7,31 @@ from scipy.interpolate import CubicSpline, interp1d
 
 def build_single_layer_lookup(k_dust_values, base_config=None):
     """Build lookup table of temperature profiles for different k_dust values."""
+    from copy import deepcopy
+    
     if base_config is None:
         base_config = SimulationConfig()
         base_config.single_layer = True
         base_config.use_RTE = False
     
     results = {}
-    # Reuse simulator instance to avoid reconstruction overhead
-    sim = Simulator(base_config)
     
     for k_dust in k_dust_values:
-        sim = Simulator(base_config)
-        sim.cfg.k_dust = k_dust
-        # Reinitialize necessary components without full reconstruction
-        #sim._init_state()
-        T_out, _, phi_th, T_surf = sim.run()
-        tstart = int(sim.cfg.tsteps_day*(sim.cfg.ndays-1))
+        # Create a fresh copy of the configuration for each run
+        cfg = deepcopy(base_config)
+        cfg.k_dust = k_dust
+        # Force recalculation of derived values by calling post_init
+        cfg.__post_init__()
+        
+        # Create new simulator with fresh config
+        sim = Simulator(cfg)
+        T_out, _, phi_th, T_surf, t_out = sim.run()
+        
         results[k_dust] = {
-            'T_out': T_out[:,tstart:],
-            'phi_therm_out': phi_th[:,tstart:],
-            'T_surf': T_surf[tstart:]
+            'T_out': T_out,
+            'phi_therm_out': phi_th,
+            'T_surf': T_surf,
+            'lut_times': t_out
         }
     return results
 
@@ -171,6 +176,8 @@ def analyze_two_layer_equivalence(dust_thickness_values, k_dust_values=None, tem
     single_layer_lookup = build_single_layer_lookup(k_dust_values, single_layer_cfg)
     single_layer_lookup['k_dust'] = np.log10(k_dust_values)
     temps = np.array([single_layer_lookup[k][temps_key] for k in k_dust_values])
+    lut_times = single_layer_lookup[k_dust_values[0]]['lut_times']
+    lut_times = (lut_times - np.min(lut_times)) / (np.max(lut_times) - np.min(lut_times))  # Normalize times to 0-1 range
     #Make interpolator function. 
     # lut_k_interp accepts log10(k_dust), outputs T_surf vs time. 
     # lut_time_interp accepts time fraction (0.0 to 1.0), outputs T_surf values for all k_dust_values.
@@ -178,7 +185,7 @@ def analyze_two_layer_equivalence(dust_thickness_values, k_dust_values=None, tem
 
     #Pre-calculate LUT max and min temperature values and time at which max temperature occurs. 
     nsolns = len(k_dust_values)
-    lut_times = np.linspace(0.0, 1.0, single_layer_cfg.tsteps_day)
+    #lut_times = np.linspace(0.0, 1.0, single_layer_cfg.tsteps_day)
     lut_max_time = np.zeros(nsolns)
     lut_max_T = np.zeros(nsolns)
     lut_min_T = np.zeros(nsolns)
@@ -215,15 +222,15 @@ def analyze_two_layer_equivalence(dust_thickness_values, k_dust_values=None, tem
             # Run two-layer model
             two_layer_cfg.dust_thickness = dust_thickness
             sim = Simulator(two_layer_cfg)
-            T_out, _, phi_th, T_surf = sim.run()
+            T_out, _, phi_th, T_surf,_ = sim.run()
 
             if(temps_key == 'T_surf'):
                 modelT = T_surf.copy()
             else:
                 modelT = phi_T_surf(phi_th[0,:])
 
-            tstart = int(sim.cfg.tsteps_day*(sim.cfg.ndays-1))
-            modelT = modelT[tstart:]  # Use last day temperatures
+            #tstart = int(sim.cfg.tsteps_day*(sim.cfg.ndays-1))
+            #modelT = modelT[tstart:]  # Use last day temperatures
 
             # Find best fit
             best_k_dust, error, best_temps = find_best_fit_k_dust(modelT, single_layer_lookup)
@@ -237,8 +244,8 @@ def analyze_two_layer_equivalence(dust_thickness_values, k_dust_values=None, tem
             
             # Plot comparison
             plt.subplot(3, 4, (i % 12) + 1)
-            plt.plot(sim.t[tstart:] / 3600, modelT, 'b-', label='Two-layer')
-            plt.plot(sim.t[tstart:] / 3600, best_temps, 'r--', 
+            plt.plot(sim.t_out / 3600, modelT, 'b-', label='Two-layer')
+            plt.plot(sim.t_out / 3600, best_temps, 'r--', 
                     label=f'Single-layer (k={best_k_dust:.2e})')
             plt.title(f'd={dust_thickness:.2e}m')
             if i % 12 == 0:

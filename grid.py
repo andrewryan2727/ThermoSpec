@@ -26,13 +26,14 @@ class LayerGrid:
 
     def _build_layers(self):
         cfg = self.config
+        dust_lthick, rock_lthick = self._calculate_lthick()
         if cfg.single_layer:
             # Single layer case - use dust properties for everything
             if(cfg.geometric_spacing):
                 #Spacing increases by geometric factor spacing_factor
-                s = cfg.dust_lthick  #first layer spacing, tau units. 
+                s = dust_lthick  #first layer spacing, tau units. 
                 L = cfg.dust_thickness * cfg.Et #Total dust column thickness, converted to tau units
-                x_nodes = [-cfg.dust_lthick/2.] #virtual node. 
+                x_nodes = [-dust_lthick/2.] #virtual node. 
 
 
                 # keep adding nodes until the next would go past L
@@ -50,9 +51,9 @@ class LayerGrid:
             else:
                 # Uniform layer thickness. 
                 dust_tau = cfg.dust_thickness * cfg.Et
-                nlay_dust_init = int(round(dust_tau / cfg.dust_lthick))
+                nlay_dust_init = int(round(dust_tau / dust_lthick))
                 # revise actual layer thickness to match integer layer count
-                cfg.dust_lthick = dust_tau / nlay_dust_init
+                dust_lthick = dust_tau / nlay_dust_init
                 self.nlay_dust = nlay_dust_init 
                 
                 # Total nodes (including virtual top/bottom)
@@ -60,32 +61,33 @@ class LayerGrid:
                 x = np.zeros(x_num)
                 
                 # Virtual top node and first real node
-                x[0] = -cfg.dust_lthick / 2.0
-                x[1] = cfg.dust_lthick / 2.0
+                x[0] = -dust_lthick / 2.0
+                x[1] = dust_lthick / 2.0
                 
                 # Remaining nodes
                 for i in range(2, self.nlay_dust):
-                    x[i] = x[i-1] + cfg.dust_lthick
+                    x[i] = x[i-1] + dust_lthick
 
                 #Ensure last real node is in the correct position, accouting for changes due to rounding in conversion from m to tau. 
-                x[-2] = cfg.dust_thickness * cfg.Et - cfg.dust_lthick / 2.0
-                x[-1] = x[-2] + cfg.dust_lthick
+                x[-2] = cfg.dust_thickness * cfg.Et - dust_lthick / 2.0
+                x[-1] = x[-2] + dust_lthick
 
         else:
+            # Two-layer case - dust and rock layers
             # Calculate dust layer thicknesses in terms of optical depth tau
             dust_tau = cfg.dust_thickness * cfg.Et
-            nlay_dust_init = int(round(dust_tau / cfg.dust_lthick))
+            nlay_dust_init = int(round(dust_tau / dust_lthick))
             # revise actual layer thickness to match integer layer count
             dust_lthick = dust_tau / nlay_dust_init
             self.nlay_dust = nlay_dust_init + 1
 
             # Ensure minimum dust layer count
-            if(self.nlay_dust < 15):
-                dust_lthick = dust_tau / 15.0
-                self.nlay_dust = 16
+            if(self.nlay_dust < 10):
+                dust_lthick = dust_tau / 10.0
+                self.nlay_dust = 11
 
             # Rock layer count and thickness in tau units
-            nlay_rock = int(round(cfg.rock_thickness / cfg.rock_lthick))
+            nlay_rock = int(round(cfg.rock_thickness / rock_lthick))
             rock_tau = cfg.rock_thickness * cfg.Et
             rock_lthick_tau = rock_tau / nlay_rock
             self.nlay_rock = nlay_rock
@@ -121,15 +123,43 @@ class LayerGrid:
         self.x_orig = x.copy()
         self.x_num = x_num
 
+    def _calculate_lthick(self):
+        """
+        Calculate layer thicknesses based on skin depth. 
+        For single layer, returns dust layer thickness.
+        For two layers, returns dust and rock layer thicknesses.
+        """
+        cfg = self.config
+        if(cfg.auto_thickness):
+            if cfg.single_layer:
+                #Single layer cases. Simpler. Use dust properties for everything.
+                dust_lthick = (cfg.dust_skin_depth * cfg.flay) #in tau units
+                rock_lthick = cfg.rock_lthick #not used. 
+            else:
+                #Two layer case. 
+                dust_lthick = (cfg.dust_skin_depth * cfg.flay) #in tau units
+                nlay = cfg.dust_thickness * cfg.Et / dust_lthick #approx number of layers in dust column
+                if(nlay < 10):
+                    #If we have less than 10 layers, increase the layer thickness to ensure sufficient resolution.
+                    dust_lthick = (cfg.dust_thickness * cfg.Et) / 10.0
+                rock_lthick = cfg.rock_skin_depth * cfg.flay * 0.25 / cfg.Et #in meters
+
+            if(cfg.use_RTE):
+                # If using RTE, make sure we have sufficient resolution in the first optical depth. 
+                #Currently setting the max first layer thickness as no more than 1/50 of optical depth. 
+                dust_lthick = max(dust_lthick, 0.02)
+        else:
+            # Use user-defined layer thicknesses
+            dust_lthick = cfg.dust_lthick
+            rock_lthick = cfg.rock_lthick   
+        return dust_lthick, rock_lthick
+        
+
     def _build_fd_matrix(self):
         cfg = self.config
         x = self.x
         x_num = len(x)
 
-        # Compute time increment
-        t_num = cfg.tsteps_day * cfg.ndays
-        dt = cfg.P * cfg.ndays / (t_num - 1)
-        self.dt = dt
 
         # Layer thickness array
         lthick = np.zeros(x_num)
@@ -175,6 +205,28 @@ class LayerGrid:
             dens[self.nlay_dust+1:] = cfg.rho_rock
             heat[self.nlay_dust+1:] = cfg.cp_rock
 
+        self.K = K
+
+        #Calculate time increment here. 
+        if cfg.auto_dt:
+            # Calculate dt based on stability criterion
+            dt_stability = np.min(10*lthick / K)
+            # Adjust dt to be nearly divisible by period
+            steps_per_day = np.ceil(cfg.P / dt_stability)
+            #Never fewer than 200 steps per day
+            if(steps_per_day < 200):
+                steps_per_day = 200
+            dt = cfg.P / steps_per_day
+            self.steps_per_day = int(steps_per_day)
+            self.dt = dt
+        else:
+            # Compute time increment
+            t_num = cfg.tsteps_day * cfg.ndays
+            dt = cfg.P * cfg.ndays / (t_num - 1)
+            self.steps_per_day = cfg.tsteps_day
+            self.dt = dt
+        print(f"Time step: {dt:.6f} s, Steps per day: {self.steps_per_day}")
+
         # Finite-difference stencil (non-uniform)
         A1 = (
             2*dt*cond[1:-1]
@@ -189,4 +241,3 @@ class LayerGrid:
 
         # Build banded matrix
         self.diag = fd1d_heat_implicit_diagonal_nonuniform_kieffer(x_num, A1, A2, A3)
-        self.K = K
