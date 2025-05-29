@@ -150,6 +150,17 @@ def find_best_fit_k_dust(modelT, single_layer_lookup, temps_key='T_surf', start_
     
     return best_k_dust, rmserr_many_time_scalar(result.x,modelT,lut_times, lut_times, single_layer_lookup), best_temps
 
+def emissionT(T,tau,mu=1.0):
+    # Calculate effective emission temperature from radiative flux.
+    # T is the temperature profile, tau is the optical depth profile, mu is the cosine of the emission angle (observer). 
+	T_calc = 0.0
+	wt_calc = 0.0
+	for i in np.arange(len(T)):
+		T_calc += (T[i]**4.0)*np.exp(-tau[i]/mu)
+		wt_calc += np.exp(-tau[i]/mu)
+	T_calc = T_calc/wt_calc
+	return(T_calc**0.25)
+
 def analyze_two_layer_equivalence(dust_thickness_values, k_dust_values=None, temps_key='T_surf'):
     """Analyze equivalent single-layer k_dust for different two-layer dust thicknesses."""
     if k_dust_values is None:
@@ -169,6 +180,11 @@ def analyze_two_layer_equivalence(dust_thickness_values, k_dust_values=None, tem
     single_layer_cfg.k_dust_auto = False  # Use fixed k_dust values
     single_layer_cfg.rho_dust = two_layer_cfg.rho_rock  # Use same density as two-layer model
     single_layer_cfg.cp_dust = two_layer_cfg.cp_rock  # Use same specific heat as two-layer model
+
+    if(single_layer_cfg.use_RTE):
+         lut_temps_key = 'emissT'
+    else:
+         lut_temps_key = 'T_surf'
     
     # Build single-layer lookup table
     print("Building single-layer lookup table...")
@@ -181,7 +197,7 @@ def analyze_two_layer_equivalence(dust_thickness_values, k_dust_values=None, tem
     #Make interpolator function. 
     # lut_k_interp accepts log10(k_dust), outputs T_surf vs time. 
     # lut_time_interp accepts time fraction (0.0 to 1.0), outputs T_surf values for all k_dust_values.
-    lut_k_interp, lut_time_interp  = interpolate_temps(single_layer_lookup, temps_key='T_surf')
+    lut_k_interp, lut_time_interp  = interpolate_temps(single_layer_lookup, temps_key=lut_temps_key)
 
     #Pre-calculate LUT max and min temperature values and time at which max temperature occurs. 
     nsolns = len(k_dust_values)
@@ -247,7 +263,7 @@ def analyze_two_layer_equivalence(dust_thickness_values, k_dust_values=None, tem
             plt.plot(sim.t_out / 3600, modelT, 'b-', label='Two-layer')
             plt.plot(sim.t_out / 3600, best_temps, 'r--', 
                     label=f'Single-layer (k={best_k_dust:.2e})')
-            plt.title(f'd={dust_thickness:.2e}m')
+            plt.title(f'd={dust_thickness:.2e}m, TI={results[dust_thickness]["thermal_inertia"]:.1f}')
             if i % 12 == 0:
                 plt.legend()
             
@@ -265,8 +281,7 @@ if __name__ == "__main__":
                                     500.0e-6, 0.001, 0.002, 0.005, 0.01, 0.02])
     k_dust_values = np.logspace(-5, 0, 25)  # 25 values from 1e-5 to 1e0
     
-    temps_key = 'T_surf'  # Key for temperature profiles in results
-    results = analyze_two_layer_equivalence(dust_thickness_values, k_dust_values, temps_key=temps_key)
+    results = analyze_two_layer_equivalence(dust_thickness_values, k_dust_values)
     
     # Plot summary of results
     import matplotlib.pyplot as plt

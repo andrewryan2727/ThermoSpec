@@ -197,12 +197,14 @@ class Simulator:
 								   bounds_error=True, assume_sorted=True)
 			T_surf_interp = interp1d(t_hist, T_surf_hist, kind='cubic',
 								bounds_error=True, assume_sorted=True)
-			
+			mu_interp = interp1d(t_hist, self.mu_array, kind='linear',
+								bounds_error=True, assume_sorted=True)
 			# Interpolate to clipped output times
 			self.T_out = T_interp(t_out_clipped)
 			self.phi_vis_out = phi_vis_interp(t_out_clipped)
 			self.phi_therm_out = phi_therm_interp(t_out_clipped)
 			self.T_surf_out = T_surf_interp(t_out_clipped)
+			self.mu_array = mu_interp(t_out_clipped)
 		except ValueError as e:
 			print(f"Warning in interpolation: {e}")
 			# Fall back to linear interpolation if cubic fails
@@ -210,6 +212,7 @@ class Simulator:
 			self.phi_vis_out = phi_vis_hist[:, -len(self.t_out):]
 			self.phi_therm_out = phi_therm_hist[:, -len(self.t_out):]
 			self.T_surf_out = T_surf_hist[-len(self.t_out):]
+			self.mu_array = self.mu_array[-len(self.t_out):]
 
 	def run(self):
 		"""Execute the full time-stepping simulation."""
@@ -249,6 +252,15 @@ class Simulator:
 		
 		return self.T_out, self.phi_vis_out, self.phi_therm_out, self.T_surf_out, self.t_out
 
+def emissionT(T,tau,mu):
+	T_calc = 0.0
+	wt_calc = 0.0
+	for i in np.arange(len(T)):
+		T_calc += (T[i]**4.0)*np.exp(-tau[i]/mu)
+		wt_calc += np.exp(-tau[i]/mu)
+	T_calc = T_calc/wt_calc
+	return(T_calc**0.25)
+
 if __name__ == "__main__":
 	sim = Simulator()
 	T_out, phi_vis, phi_therm, T_surf_out, t_out = sim.run()
@@ -257,8 +269,12 @@ if __name__ == "__main__":
 	# Plot temperature at the surface (first grid point) over time
 	plt.figure(figsize=(10, 5))
 	if(sim.cfg.use_RTE):
-		#plt.plot(sim.t_out / 3600, (2.0*phi_therm[0,:]*np.pi/5.670e-8)**0.25, label='Surface Temperature')
-		plt.plot(sim.t_out / 3600, T_out[0,:], label='Surface Temperature')
+		plt.plot(sim.t_out / 3600, (2.0*phi_therm[0,:]*np.pi/5.670e-8)**0.25, label='Phi temperature')
+		plt.plot(sim.t_out / 3600, T_out[1,:], label='Surface Temperature')
+		emissT = emissionT(T_out[1:sim.grid.nlay_dust+1,:],sim.grid.x[1:sim.grid.nlay_dust+1],1.0)
+		#for j in np.arange(len(sim.t_out)):
+		#	emissT[j] = emissionT(T_out[1:sim.grid.nlay_dust+1,j],sim.grid.x[1:sim.grid.nlay_dust+1],1.0)
+		plt.plot(sim.t_out / 3600, emissT, label='Emission Temperature')
 	else:
 		plt.plot(sim.t_out / 3600, T_surf_out, label='Surface Temperature (no RTE)')
 	plt.xlabel('Time (hours)')

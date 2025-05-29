@@ -81,10 +81,10 @@ class LayerGrid:
             dust_lthick = dust_tau / nlay_dust_init
             self.nlay_dust = nlay_dust_init + 1
 
-            # Ensure minimum dust layer count
-            if(self.nlay_dust < 10):
-                dust_lthick = dust_tau / 10.0
-                self.nlay_dust = 11
+            # Ensure minimum number of nodes in dust column
+            if(self.nlay_dust < cfg.min_nlay_dust):
+                dust_lthick = dust_tau / cfg.min_nlay_dust
+                self.nlay_dust = cfg.min_nlay_dust + 1
 
             # Rock layer count and thickness in tau units
             nlay_rock = int(round(cfg.rock_thickness / rock_lthick))
@@ -139,15 +139,17 @@ class LayerGrid:
                 #Two layer case. 
                 dust_lthick = (cfg.dust_skin_depth * cfg.flay) #in tau units
                 nlay = cfg.dust_thickness * cfg.Et / dust_lthick #approx number of layers in dust column
-                if(nlay < 10):
+                if(nlay < cfg.min_nlay_dust):
                     #If we have less than 10 layers, increase the layer thickness to ensure sufficient resolution.
-                    dust_lthick = (cfg.dust_thickness * cfg.Et) / 10.0
-                rock_lthick = cfg.rock_skin_depth * cfg.flay * 0.25 / cfg.Et #in meters
+                    dust_lthick = (cfg.dust_thickness * cfg.Et) / cfg.min_nlay_dust
+                #Rock layer thickness is based on skin depth
+                #This often leads to excessively thick rock layers in a two-layer scenario, so we use a factor to reduce it.
+                rock_lthick = cfg.rock_skin_depth * cfg.flay * cfg.rock_lthick_fac / cfg.Et #in meters
 
             if(cfg.use_RTE):
-                # If using RTE, make sure we have sufficient resolution in the first optical depth. 
-                #Currently setting the max first layer thickness as no more than 1/50 of optical depth. 
-                dust_lthick = max(dust_lthick, 0.02)
+                # If using RTE, make sure we have sufficient resolution at the optical extinction scale. 
+                # If auto-calculated layers are too coarse, force them to be finer. 
+                dust_lthick = min(dust_lthick, cfg.dust_rte_max_lthick)
         else:
             # Use user-defined layer thicknesses
             dust_lthick = cfg.dust_lthick
@@ -210,12 +212,12 @@ class LayerGrid:
         #Calculate time increment here. 
         if cfg.auto_dt:
             # Calculate dt based on stability criterion
-            dt_stability = np.min(10*lthick / K)
+            dt_stability = cfg.dtfac*np.min(lthick / K)
             # Adjust dt to be nearly divisible by period
             steps_per_day = np.ceil(cfg.P / dt_stability)
             #Never fewer than 200 steps per day
-            if(steps_per_day < 200):
-                steps_per_day = 200
+            if(steps_per_day < cfg.minsteps):
+                steps_per_day = cfg.minsteps
             dt = cfg.P / steps_per_day
             self.steps_per_day = int(steps_per_day)
             self.dt = dt

@@ -41,33 +41,44 @@ class SimulationConfig:
 
     # Boundary & layer settings
     T_bottom: float = 250.           # bottom boundary and global initialization temperature (K)
-    dust_thickness: float = 100.0e-6  # dust column total thickness (m)
+    dust_thickness: float = 0.001  # dust column total thickness (m)
     rock_thickness: float = 0.50     # rock substrate column total thickness (m)
     auto_thickness: bool = True      # auto-calculate dust and rock layer thicknesses based on thermal skin depth
     flay: float = 0.10               # First layer thickness (fraction of skin depth) if using auto thickness.
-    dust_lthick: float = 0.02        # dust node spacing (tau units, i.e., optical opacity!)
-    rock_lthick: float = 0.0025      # rock node spacing (m)
     geometric_spacing: bool = True   # Node spacing increases by factor spacing_factor, otherwise constant thickness. Only applies to single layer scenario. 
     spacing_factor: float = 1.05     # layer thickness increase factor for geometric spacing. Only applies to single layer scenario!
 
+    dust_lthick: float = 0.02        # dust node spacing (tau units), only used if auto_thickness is False.
+    rock_lthick: float = 0.0025      # rock node spacing (m), only used if auto_thickness is False.
+
     # Simulation flags and convergence settings
     single_layer: bool = False        # use single-layer model instead of two-layer
-    use_RTE: bool = False             # use radiative transfer model
+    use_RTE: bool = True             # use radiative transfer model
     bottom_bc: str = 'neumann'       # bottom boundary condition choices: "neumann" (zero‐flux), "dirichlet" (fixed T_bottom)
     sun: bool = True                 # include solar input
     diurnal: bool = True             # include diurnal variation. If false, model is steady-state. 
+
+
+    # Time-stepping parameters
+    ndays: int = 5                   # total simulation days (diurnal cycles)
+    auto_dt: bool = True            # auto-calculate time step based on thermal skin depth
+    freq_out: int = 100              # Number of outputs per diurnal cycle. 
+    last_day: bool = True            # If True, only output last day of simulation. Otherwise, output all days.
+    tsteps_day: int = 16000          # time steps per day, only used of auto_dt is False. 
+
+
+    # Advanced times stepping and numerical accuracy prameters
+    dtfac: float = 20               # Define minimum time step as dt = tfac*min(dx/K). Higher number increases speed at risk of reduced accuracy. 
+    minsteps: int = 2000                # Minimum number of time steps per day. If auto_dt is True, this is the minimum number of time steps per day.
+    min_nlay_dust: int = 12         # Minimum number of grid points within dust column. 
+    rock_lthick_fac: float = 0.25  # Factor to multiply auto-calculated rock layer thickness by. This is used to ensure that the rock layer is not too thick compared to the dust layer.
+    dust_rte_max_lthick: float = 0.02  # Maximum dust layer thickness for RTE model (in tau units, i.e., optical opacity).
+
     custom_bvp: bool = True          # use the custom written bvp solver for RTE. Otherwise, reverts to scipy.solve_bvp
     bvp_tol: float = 1.0e-8          # tolerance for BVP solver
     bvp_max_iter: float = 1000       # max iterations for BVP solver
     T_surf_tol: float = 1.0e-4       # tolerance for surface temperature convergence
     T_surf_max_iter: int = 50        # max iterations for surface temperature convergence
-
-    # Time-stepping parameters
-    tsteps_day: int = 16000          # time steps per day
-    ndays: int = 5                   # total simulation days
-    auto_dt: bool = True            # auto-calculate time step based on thermal skin depth
-    freq_out: int = 100              # Number of outputs per diurnal cycle. 
-    last_day: bool = True            # If True, only output last day of simulation. Otherwise, output all days.
 
 
     # Physical constants
