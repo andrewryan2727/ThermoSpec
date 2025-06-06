@@ -99,7 +99,7 @@ def build_jacobian_vis_banded(A_bvp_params, gamma_vis):
     return ab
 
 
-def build_jacobian_therm_banded(A_bvp_params, gamma_therm, single_layer=False):
+def build_jacobian_therm_banded(A_bvp_params, gamma_therm, single_layer=True):
     """
     Assemble the banded Jacobian ab matrix for thermal RTE BVP.
     For single_layer=True, uses same boundary conditions as visible RTE.
@@ -123,7 +123,12 @@ def build_jacobian_therm_banded(A_bvp_params, gamma_therm, single_layer=False):
     sup[1:N]  = A_ip1
 
     # Dirichlet condition for single layer and two layer
-    main[N] = 1.0
+    if single_layer:
+        main[N] = 1.0
+    else:
+        sub[N]   = -1.0
+        main[N]  = 2*hN + 1
+        sup[N]   = 0.0
 
     # pack into ab for solve_banded((1,1), ...)
     ab[0, 1:]   = sup[:-1]

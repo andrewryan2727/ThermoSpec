@@ -2,9 +2,9 @@ import time
 import numpy as np
 from config import SimulationConfig
 from grid import LayerGrid
-from rte import RadiativeTransfer
+from rte_hapke import RadiativeTransfer
+from rte_disort import DisortRTESolver
 from scipy.linalg import solve_banded
-from numba import jit, njit
 
 
 # -----------------------------------------------------------------------------
@@ -28,7 +28,8 @@ class Simulator:
 		# Build spatial grid and FD matrix
 		self.grid = LayerGrid(self.cfg)
 		# Initialize radiative-transfer solver
-		self.rte  = RadiativeTransfer(self.cfg, self.grid)
+		self.rte_hapke  = RadiativeTransfer(self.cfg, self.grid)
+		self.rte_disort = DisortRTESolver(self.cfg, self.grid)
 		# Precompute time arrays and insolation flags
 		self._setup_time_arrays()
 		# Initialize state variables and output arrays
@@ -175,8 +176,9 @@ class Simulator:
 		# Convert history lists to arrays for interpolation
 		t_hist = np.array(self.t_history)
 		T_hist = np.stack(self.T_history, axis=1)
-		phi_vis_hist = np.stack(self.phi_vis_history, axis=1)
-		phi_therm_hist = np.stack(self.phi_therm_history, axis=1)
+		if(self.cfg.RTE_solver == 'hapke'):
+			phi_vis_hist = np.stack(self.phi_vis_history, axis=1)
+			phi_therm_hist = np.stack(self.phi_therm_history, axis=1)
 		T_surf_hist = np.array(self.T_surf_history)
 		
 		# Ensure output times are within the simulation time range with a small buffer
@@ -191,26 +193,29 @@ class Simulator:
 			# Create interpolators with cubic splines for smoother results
 			T_interp = interp1d(t_hist, T_hist, axis=1, kind='cubic', 
 							bounds_error=True, assume_sorted=True)
-			phi_vis_interp = interp1d(t_hist, phi_vis_hist, axis=1, kind='cubic',
-							 bounds_error=True, assume_sorted=True)
-			phi_therm_interp = interp1d(t_hist, phi_therm_hist, axis=1, kind='cubic',
-								   bounds_error=True, assume_sorted=True)
+			if(self.cfg.RTE_solver == 'hapke'):
+				phi_vis_interp = interp1d(t_hist, phi_vis_hist, axis=1, kind='cubic',
+								bounds_error=True, assume_sorted=True)
+				phi_therm_interp = interp1d(t_hist, phi_therm_hist, axis=1, kind='cubic',
+									bounds_error=True, assume_sorted=True)
 			T_surf_interp = interp1d(t_hist, T_surf_hist, kind='cubic',
 								bounds_error=True, assume_sorted=True)
 			mu_interp = interp1d(t_hist, self.mu_array, kind='linear',
 								bounds_error=True, assume_sorted=True)
 			# Interpolate to clipped output times
 			self.T_out = T_interp(t_out_clipped)
-			self.phi_vis_out = phi_vis_interp(t_out_clipped)
-			self.phi_therm_out = phi_therm_interp(t_out_clipped)
+			if(self.cfg.RTE_solver == 'hapke'):
+				self.phi_vis_out = phi_vis_interp(t_out_clipped)
+				self.phi_therm_out = phi_therm_interp(t_out_clipped)
 			self.T_surf_out = T_surf_interp(t_out_clipped)
 			self.mu_array = mu_interp(t_out_clipped)
 		except ValueError as e:
 			print(f"Warning in interpolation: {e}")
 			# Fall back to linear interpolation if cubic fails
 			self.T_out = T_hist[:, -len(self.t_out):]
-			self.phi_vis_out = phi_vis_hist[:, -len(self.t_out):]
-			self.phi_therm_out = phi_therm_hist[:, -len(self.t_out):]
+			if(self.cfg.RTE_solver == 'hapke'):
+				self.phi_vis_out = phi_vis_hist[:, -len(self.t_out):]
+				self.phi_therm_out = phi_therm_hist[:, -len(self.t_out):]
 			self.T_surf_out = T_surf_hist[-len(self.t_out):]
 			self.mu_array = self.mu_array[-len(self.t_out):]
 
@@ -227,7 +232,15 @@ class Simulator:
 			if j > 0:
 				# Compute radiative source term (if RTE enabled, otherwise remains zero)
 				if self.cfg.use_RTE:
-					self.source_term = self.rte.compute_source(self.T, self.mu, self.F)
+					if(self.cfg.RTE_solver == 'hapke'):
+						self.source_term = self.rte_hapke.compute_source(self.T, self.mu, self.F)
+						self.phi_vis_history.append(self.rte_hapke.phi_vis_prev.copy())
+						self.phi_therm_history.append(self.rte_hapke.phi_therm_prev.copy())
+					elif(self.cfg.RTE_solver == 'disort'):
+						self.source_term = self.rte_disort.disort_run(self.T,self.mu,self.F)
+					else:
+						print("Error: Invalid RTE solver choice! Options are hapke or disort, or set use_RTE to False")
+						return self.T_out, self.phi_vis_out, self.phi_therm_out, self.T_surf_out, self.t_out
 				# Advance heat equation implicitly
 				self._fd1d_heat_implicit_diag()
 				# Apply boundary conditions
@@ -235,8 +248,6 @@ class Simulator:
 			
 			# Store current state for interpolation
 			self.T_history.append(self.T.copy())
-			self.phi_vis_history.append(self.rte.phi_vis_prev.copy())
-			self.phi_therm_history.append(self.rte.phi_therm_prev.copy())
 			self.T_surf_history.append(self.T_surf)
 			self.t_history.append(self.current_time)
 			
@@ -269,7 +280,7 @@ if __name__ == "__main__":
 	# Plot temperature at the surface (first grid point) over time
 	plt.figure(figsize=(10, 5))
 	if(sim.cfg.use_RTE):
-		plt.plot(sim.t_out / 3600, (2.0*phi_therm[0,:]*np.pi/5.670e-8)**0.25, label='Phi temperature')
+		#plt.plot(sim.t_out / 3600, (2.0*phi_therm[0,:]*np.pi/5.670e-8)**0.25, label='Phi temperature')
 		plt.plot(sim.t_out / 3600, T_out[1,:], label='Surface Temperature')
 		#emissT = emissionT(T_out[1:sim.grid.nlay_dust+1,:],sim.grid.x[1:sim.grid.nlay_dust+1],1.0)
 		emissT = np.zeros(len(sim.t_out))
@@ -316,31 +327,32 @@ if __name__ == "__main__":
 	plt.grid(True)
 	plt.show()
 
-	# For RTE quantities (phi), only plot dust layer values
-	x_dust = x[1:sim.grid.nlay_dust+1]  # Exclude virtual nodes, only dust layers
-	
-	# Plot phi_therm in dust layer
-	plt.figure(figsize=(10, 6))
-	for frac in plot_fracs:
-		idx = np.argmin(np.abs(time_fracs - frac))
-		plt.semilogx(x_dust/Et, phi_therm[:,idx], 
-					 label=f't+{frac:.1f}P')
-	
-	plt.xlabel('Depth into medium [m]')
-	plt.ylabel('phi_therm')
-	plt.legend(loc='upper right')
-	plt.grid(True)
-	plt.show()
+	if sim.cfg.RTE_solver == 'hapke':
+		# For RTE quantities (phi), only plot dust layer values
+		x_dust = x[1:sim.grid.nlay_dust+1]  # Exclude virtual nodes, only dust layers
+		
+		# Plot phi_therm in dust layer
+		plt.figure(figsize=(10, 6))
+		for frac in plot_fracs:
+			idx = np.argmin(np.abs(time_fracs - frac))
+			plt.semilogx(x_dust/Et, phi_therm[:,idx], 
+						label=f't+{frac:.1f}P')
+		
+		plt.xlabel('Depth into medium [m]')
+		plt.ylabel('phi_therm')
+		plt.legend(loc='upper right')
+		plt.grid(True)
+		plt.show()
 
-	# Plot phi_vis in dust layer
-	plt.figure(figsize=(10, 6))
-	for frac in plot_fracs:
-		idx = np.argmin(np.abs(time_fracs - frac))
-		plt.semilogx(x_dust/Et, phi_vis[:,idx], 
-					 label=f't+{frac:.1f}P')
-	
-	plt.xlabel('Depth into medium [m]')
-	plt.ylabel('phi_vis')
-	plt.legend(loc='upper right')
-	plt.grid(True)
-	plt.show()
+		# Plot phi_vis in dust layer
+		plt.figure(figsize=(10, 6))
+		for frac in plot_fracs:
+			idx = np.argmin(np.abs(time_fracs - frac))
+			plt.semilogx(x_dust/Et, phi_vis[:,idx], 
+						label=f't+{frac:.1f}P')
+		
+		plt.xlabel('Depth into medium [m]')
+		plt.ylabel('phi_vis')
+		plt.legend(loc='upper right')
+		plt.grid(True)
+		plt.show()

@@ -122,6 +122,14 @@ class LayerGrid:
         self.x_RTE = x[1:-1].copy() if cfg.single_layer else x[1:self.nlay_dust+1].copy()
         self.x_orig = x.copy()
         self.x_num = x_num
+        self.dtau = np.insert(np.diff(self.x_RTE),0,self.x_RTE[0]*2) #Array of thickness values of computational layers, for disort. 
+        #Calculate coordinates at the edge of each computational layer, for disort. 
+        x_boundaries = np.zeros(len(self.dtau)+1)
+        for i in np.arange(len(self.dtau)):
+            if(i!=0):
+                x_boundaries[i] = x_boundaries[i-1] + self.dtau[i-1]
+        x_boundaries[-1] = x_boundaries[-2] + self.dtau[-1]
+        self.x_boundaries = x_boundaries
 
     def _calculate_lthick(self):
         """

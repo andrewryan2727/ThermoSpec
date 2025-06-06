@@ -21,12 +21,14 @@ class SimulationConfig:
     Et: float = 7000.0               # thermal extinction coefficient (m^-1)
     eta: float = 1.0                 # visible/thermal extinction ratio 
     em: float = 0.90                 # thermal emissivity, ONLY USED FOR NON-RTE MODELS
-    albedo: float = 0.0178              # surface albedo, ONLY USED FOR NON-RTE MODELS   
+    albedo: float = 0.0178              # surface albedo, ONLY USED FOR NON-RTE MODELS
+    g_param: float = 0.0              # asymmetry parameter for RTE model, 0.0 means isotropic scattering   
+    R_base: float = 0.0             # base reflectivity for RTE model, 0.0 means no base reflectivity
 
     # Orbital & rotational parameters
     R: float = 1.2447                   # heliocentric distance (AU)
     latitude: float = 34.6 * np.pi/180.0  # latitude (rad)
-    P: float = 4.632622 * 3600.0        #Rotational period in s
+    P: float = 7.632622 * 3600.0        #Rotational period in s
 
     # Dust (or top layer) material properties
     k_dust: float = 5.5e-4           # dust thermal conductivity (W/m/K). If using RTE model, this should just be phonon conduction. 5.5e-4
@@ -40,9 +42,9 @@ class SimulationConfig:
     cp_rock: float = 700.0           # rock heat capacity (J/kg/K)
 
     # Boundary & layer settings
-    T_bottom: float = 275.           # bottom boundary and global initialization temperature (K)
-    dust_thickness: float = 20.0e-6  # dust column total thickness (m)
-    rock_thickness: float = 0.50     # rock substrate column total thickness (m)
+    T_bottom: float = 275.           # bottom boundary temperature (when Dirichlet) and global initialization temperature (K)
+    dust_thickness: float = 0.10  # dust column total thickness (m)
+    rock_thickness: float = 1.0     # rock substrate column total thickness (m)
     auto_thickness: bool = True      # auto-calculate dust and rock layer thicknesses based on thermal skin depth
     flay: float = 0.10               # First layer thickness (fraction of skin depth) if using auto thickness.
     geometric_spacing: bool = True   # Node spacing increases by factor spacing_factor, otherwise constant thickness. Only applies to single layer scenario. 
@@ -52,8 +54,9 @@ class SimulationConfig:
     rock_lthick: float = 0.0025      # rock node spacing (m), only used if auto_thickness is False.
 
     # Simulation flags and convergence settings
-    single_layer: bool = False        # use single-layer model instead of two-layer
+    single_layer: bool = True        # use single-layer model instead of two-layer
     use_RTE: bool = True             # use radiative transfer model
+    RTE_solver: str = 'disort'       # Options are disort or hapke
     bottom_bc: str = 'neumann'       # bottom boundary condition choices: "neumann" (zero‐flux), "dirichlet" (fixed T_bottom)
     sun: bool = True                 # include solar input
     diurnal: bool = True             # include diurnal variation. If false, model is steady-state. 
@@ -61,28 +64,35 @@ class SimulationConfig:
 
     # Time-stepping parameters
     ndays: int = 5                   # total simulation days (diurnal cycles)
-    auto_dt: bool = True            # auto-calculate time step based on thermal skin depth
+    auto_dt: bool = True             # auto-calculate time step based on thermal skin depth
     freq_out: int = 100              # Number of outputs per diurnal cycle. 
     last_day: bool = True            # If True, only output last day of simulation. Otherwise, output all days.
+    # Manual time-stepping options:
     tsteps_day: int = 16000          # time steps per day, only used of auto_dt is False. 
 
 
     # Advanced times stepping and numerical accuracy prameters
-    dtfac: float = 20               # Define minimum time step as dt = tfac*min(dx/K). Higher number increases speed at risk of reduced accuracy. 
-    minsteps: int = 2000                # Minimum number of time steps per day. If auto_dt is True, this is the minimum number of time steps per day.
-    min_nlay_dust: int = 10         # Minimum number of grid points within dust column. 
-    rock_lthick_fac: float = 0.25  # Factor to multiply auto-calculated rock layer thickness by. This is used to ensure that the rock layer is not too thick compared to the dust layer.
-    dust_rte_max_lthick: float = 0.04  # Maximum dust layer thickness for RTE model (in tau units, i.e., optical opacity).
+    dtfac: float = 10               # Define time step as dt = dtfac*min(dx/K). Higher number increases speed at risk of reduced accuracy. 
+    minsteps: int = 2000            # Minimum number of time steps per day. Used if auto_dt is True. 
+    min_nlay_dust: int = 10         # Minimum number of grid points within dust column for two-layer scenario
+    rock_lthick_fac: float = 0.25   # Factor by which to multiply auto-calculated rock layer thickness. This is used to ensure that the rock layer is not too thick compared to the dust layer.
+    dust_rte_max_lthick: float = 0.05  # Maximum first grid layer thickness for RTE model (in tau units, i.e., optical opacity). Default=0.02
 
-    custom_bvp: bool = True          # use the custom written bvp solver for RTE. Otherwise, reverts to scipy.solve_bvp
+    custom_bvp: bool = True          # use the custom written bvp solver for the hapke RTE. Otherwise, reverts to scipy.solve_bvp (which may not actually work anymore)
     bvp_tol: float = 1.0e-8          # tolerance for BVP solver
-    bvp_max_iter: float = 200       # max iterations for BVP solver, was 1000
+    bvp_max_iter: float = 200        # max iterations for BVP solver
     T_surf_tol: float = 1.0e-4       # tolerance for surface temperature convergence
     T_surf_max_iter: int = 50        # max iterations for surface temperature convergence
 
+    #DISORT radiative transfer options. Note that nmom and nstr are usuall equal. 
+    nmom: int = 8            # Number of moments to phase function. But be >= nstr
+    nstr: int = 8            # Number of streams for disort discrete ordinate method. 
+    wavenums: tuple = (20, 4000) #Wavenumber range for thermal emission calculations (cm^-1)
+    g: float = 0.0            # Scattering assymetry parameter.
+
 
     # Physical constants
-    sigma: float = 5.670374e-8       # Stefan-Boltzmann constant (W/m^2/K^4)
+    sigma: float = 5.670373e-8       # Stefan-Boltzmann constant (W/m^2/K^4)
 
     # Computed fields
     gamma_vis: float = field(init=False)
