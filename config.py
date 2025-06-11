@@ -16,13 +16,12 @@ import numpy as np
 @dataclass
 class SimulationConfig:
     # Radiative properties
-    ssalb_vis: float = 0.10          # single-scattering visible albedo
+    ssalb_vis: float = 0.1          # single-scattering visible albedo
     gamma_therm: float = 0.9         # thermal albedo factor
     Et: float = 7000.0               # thermal extinction coefficient (m^-1)
     eta: float = 1.0                 # visible/thermal extinction ratio 
     em: float = 0.90                 # thermal emissivity, ONLY USED FOR NON-RTE MODELS
     albedo: float = 0.0178              # surface albedo, ONLY USED FOR NON-RTE MODELS
-    g_param: float = 0.0              # asymmetry parameter for RTE model, 0.0 means isotropic scattering   
     R_base: float = 0.0             # base reflectivity for RTE model, 0.0 means no base reflectivity
 
     # Orbital & rotational parameters
@@ -43,20 +42,21 @@ class SimulationConfig:
 
     # Boundary & layer settings
     T_bottom: float = 275.           # bottom boundary temperature (when Dirichlet) and global initialization temperature (K)
-    dust_thickness: float = 0.10  # dust column total thickness (m)
+    dust_thickness: float = 0.25  # dust column total thickness (m)
     rock_thickness: float = 1.0     # rock substrate column total thickness (m)
     auto_thickness: bool = True      # auto-calculate dust and rock layer thicknesses based on thermal skin depth
     flay: float = 0.10               # First layer thickness (fraction of skin depth) if using auto thickness.
     geometric_spacing: bool = True   # Node spacing increases by factor spacing_factor, otherwise constant thickness. Only applies to single layer scenario. 
     spacing_factor: float = 1.05     # layer thickness increase factor for geometric spacing. Only applies to single layer scenario!
 
+    # 
     dust_lthick: float = 0.02        # dust node spacing (tau units), only used if auto_thickness is False.
     rock_lthick: float = 0.0025      # rock node spacing (m), only used if auto_thickness is False.
 
     # Simulation flags and convergence settings
     single_layer: bool = True        # use single-layer model instead of two-layer
     use_RTE: bool = True             # use radiative transfer model
-    RTE_solver: str = 'disort'       # Options are disort or hapke
+    RTE_solver: str = 'hapke'       # Options are disort or hapke
     bottom_bc: str = 'neumann'       # bottom boundary condition choices: "neumann" (zero‐flux), "dirichlet" (fixed T_bottom)
     sun: bool = True                 # include solar input
     diurnal: bool = True             # include diurnal variation. If false, model is steady-state. 
@@ -74,9 +74,9 @@ class SimulationConfig:
     # Advanced times stepping and numerical accuracy prameters
     dtfac: float = 10               # Define time step as dt = dtfac*min(dx/K). Higher number increases speed at risk of reduced accuracy. 
     minsteps: int = 2000            # Minimum number of time steps per day. Used if auto_dt is True. 
-    min_nlay_dust: int = 10         # Minimum number of grid points within dust column for two-layer scenario
+    min_nlay_dust: int = 12         # Minimum number of grid points within dust column for two-layer scenario
     rock_lthick_fac: float = 0.25   # Factor by which to multiply auto-calculated rock layer thickness. This is used to ensure that the rock layer is not too thick compared to the dust layer.
-    dust_rte_max_lthick: float = 0.05  # Maximum first grid layer thickness for RTE model (in tau units, i.e., optical opacity). Default=0.02
+    dust_rte_max_lthick: float = 0.02  # Maximum first grid layer thickness for RTE model (in tau units, i.e., optical opacity). Default=0.02
 
     custom_bvp: bool = True          # use the custom written bvp solver for the hapke RTE. Otherwise, reverts to scipy.solve_bvp (which may not actually work anymore)
     bvp_tol: float = 1.0e-8          # tolerance for BVP solver
@@ -85,10 +85,19 @@ class SimulationConfig:
     T_surf_max_iter: int = 50        # max iterations for surface temperature convergence
 
     #DISORT radiative transfer options. Note that nmom and nstr are usuall equal. 
-    nmom: int = 8            # Number of moments to phase function. But be >= nstr
-    nstr: int = 8            # Number of streams for disort discrete ordinate method. 
-    wavenums: tuple = (20, 4000) #Wavenumber range for thermal emission calculations (cm^-1)
-    g: float = 0.0            # Scattering assymetry parameter.
+    nmom: int = 16            # Number of moments to phase function. But be >= nstr
+    nstr: int = 16            # Number of streams for disort discrete ordinate method. 
+    g: float = 0.5            # Scattering assymetry parameter.
+
+    #DISORT multi-wavelength options. Note that Cext in files is assumed to be in units of µm^2, as it is likely that the user defined particle size and wavelength in µm. 
+    multi_wave: bool = False  # Use multiple wavelengths, using wavelength-dependent optical properties from file (extinction coefficient, ssalb, scattering matrix moments)
+    folder: str = "/Users/ryan/Research/RT_models/RT_thermal_model/optical_constants/Quartz_5micron_30wns/pack_frac_0.35/output" #path to scattering table files
+    solar_spectrum_file: str = '/Users/ryan/Research/RT_models/RT_thermal_model/optical_constants/spectrum_integrated_30.txt'  #integrates solar spectrum. Must have same spectral sampling as scattering matrix. 
+    fill_frac: float = 0.35   #Fill fraction for particles. 
+    radius: float = 5.0e-6    #Particle radius in meters. 
+
+    #DISORT depth-dependent options. NOT YET IMPLEMENTED. 
+    depth_dependent: bool = False #Depth-dependent optical properties from file (extinction coefficient, ssalb, scattering matrix moments)
 
 
     # Physical constants

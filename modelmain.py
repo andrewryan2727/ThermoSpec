@@ -28,8 +28,10 @@ class Simulator:
 		# Build spatial grid and FD matrix
 		self.grid = LayerGrid(self.cfg)
 		# Initialize radiative-transfer solver
-		self.rte_hapke  = RadiativeTransfer(self.cfg, self.grid)
-		self.rte_disort = DisortRTESolver(self.cfg, self.grid)
+		if(self.cfg.use_RTE and self.cfg.RTE_solver == 'hapke'):
+			self.rte_hapke  = RadiativeTransfer(self.cfg, self.grid)
+		if(self.cfg.use_RTE and self.cfg.RTE_solver == 'disort'):
+			self.rte_disort = DisortRTESolver(self.cfg, self.grid)
 		# Precompute time arrays and insolation flags
 		self._setup_time_arrays()
 		# Initialize state variables and output arrays
@@ -234,8 +236,6 @@ class Simulator:
 				if self.cfg.use_RTE:
 					if(self.cfg.RTE_solver == 'hapke'):
 						self.source_term = self.rte_hapke.compute_source(self.T, self.mu, self.F)
-						self.phi_vis_history.append(self.rte_hapke.phi_vis_prev.copy())
-						self.phi_therm_history.append(self.rte_hapke.phi_therm_prev.copy())
 					elif(self.cfg.RTE_solver == 'disort'):
 						self.source_term = self.rte_disort.disort_run(self.T,self.mu,self.F)
 					else:
@@ -250,6 +250,9 @@ class Simulator:
 			self.T_history.append(self.T.copy())
 			self.T_surf_history.append(self.T_surf)
 			self.t_history.append(self.current_time)
+			if(self.cfg.use_RTE and self.cfg.RTE_solver=='hapke'):
+				self.phi_vis_history.append(self.rte_hapke.phi_vis_prev.copy())
+				self.phi_therm_history.append(self.rte_hapke.phi_therm_prev.copy())
 			
 			# Optional progress updates
 			if j % max(100, self.t_num//20) == 0:

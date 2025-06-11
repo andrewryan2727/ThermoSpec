@@ -4,6 +4,7 @@ from stencils import (
     fd1d_heat_implicit_diagonal_nonuniform_kieffer,
     fd1d_heat_implicit_matrix_nonuniform_kieffer
 )
+from parse_input_files import load_mie_folder
 
 # -----------------------------------------------------------------------------
 # File: grid.py
@@ -23,6 +24,13 @@ class LayerGrid:
         self.config = config
         self._build_layers()
         self._build_fd_matrix()
+        if(self.config.use_RTE and self.config.RTE_solver == 'disort' and self.config.multi_wave):
+            self.wavenumbers, self.ssalb_array, self.Cext_array, self.Csca_array, self.Cabs_array, self.alpha1_array = load_mie_folder(self.config.folder,self.config.nmom)
+            solar_array = np.loadtxt(self.config.solar_spectrum_file)
+            if(len(solar_array[:,0]) != len(self.wavenumbers) or np.max(solar_array[:,0]-self.wavenumbers)>0.1):
+                print("Warning: Solar spectrum file wavenumbers do not match scattering files!")
+            self.solar = solar_array[:,1]/self.config.R**2.
+        
 
     def _build_layers(self):
         cfg = self.config
@@ -118,7 +126,7 @@ class LayerGrid:
                 x[-1] = x[-2] + rock_lthick_tau
 
         # Store coordinates and counts
-        self.x = x
+        self.x = x #depth in tau units
         self.x_RTE = x[1:-1].copy() if cfg.single_layer else x[1:self.nlay_dust+1].copy()
         self.x_orig = x.copy()
         self.x_num = x_num
