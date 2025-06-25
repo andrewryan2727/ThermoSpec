@@ -5,7 +5,10 @@ from grid import LayerGrid
 from rte_hapke import RadiativeTransfer
 from rte_disort import DisortRTESolver
 from scipy.linalg import solve_banded
-
+import scipy.optimize
+import scipy.integrate
+from scipy.optimize import nnls
+from scipy.optimize import differential_evolution
 
 # -----------------------------------------------------------------------------
 # File: modelmain.py
@@ -163,6 +166,7 @@ class Simulator:
 		self.phi_vis_out = np.zeros((self.grid.nlay_dust, n_out))
 		self.phi_therm_out = np.zeros((self.grid.nlay_dust, n_out))
 		self.T_surf_out = np.zeros(n_out)
+
 		
 		# Arrays for storing integration step results for interpolation
 		self.T_history = []
@@ -171,66 +175,113 @@ class Simulator:
 		self.T_surf_history = []
 		self.t_history = []
 
-	def _interpolate_outputs(self):
-		"""Interpolate integration results to desired output times."""
+	def _make_outputs(self):
+		"""Interpolate integration results to desired output times, or just use final step for non-diurnal. Always compute DISORT radiance if needed."""
 		from scipy.interpolate import interp1d
-		
-		# Convert history lists to arrays for interpolation
-		t_hist = np.array(self.t_history)
-		T_hist = np.stack(self.T_history, axis=1)
-		if(self.cfg.RTE_solver == 'hapke'):
-			phi_vis_hist = np.stack(self.phi_vis_history, axis=1)
-			phi_therm_hist = np.stack(self.phi_therm_history, axis=1)
-		T_surf_hist = np.array(self.T_surf_history)
-		
-		# Ensure output times are within the simulation time range with a small buffer
-		# to avoid floating point edge cases
-		t_min = t_hist[0]
-		t_max = t_hist[-1]
-		dt = np.mean(np.diff(t_hist))  # Average time step
-		eps = dt * 1e-10  # Small fraction of a time step
-		t_out_clipped = np.clip(self.t_out, t_min + eps, t_max - eps)
-		
-		try:
-			# Create interpolators with cubic splines for smoother results
-			T_interp = interp1d(t_hist, T_hist, axis=1, kind='cubic', 
-							bounds_error=True, assume_sorted=True)
-			if(self.cfg.RTE_solver == 'hapke'):
-				phi_vis_interp = interp1d(t_hist, phi_vis_hist, axis=1, kind='cubic',
+		non_diurnal = not self.cfg.diurnal
+		if non_diurnal:
+			self.T_out = np.expand_dims(self.T_history[-1], axis=1)
+			self.T_surf_out = np.array([self.T_surf_history[-1]])
+			if self.cfg.use_RTE and self.cfg.RTE_solver == 'hapke':
+				self.phi_vis_out = np.expand_dims(self.phi_vis_history[-1], axis=1)
+				self.phi_therm_out = np.expand_dims(self.phi_therm_history[-1], axis=1)
+			self.t_out = np.array([self.t_history[-1]])
+			self.mu_out = np.array([self.mu_array[-1]])
+		else:
+			#Interpolate outputs to the desired user frequency, across whole sim or just in final day. 
+			# Convert history lists to arrays for interpolation
+			t_hist = np.array(self.t_history)
+			T_hist = np.stack(self.T_history, axis=1)
+			if(self.cfg.use_RTE and self.cfg.RTE_solver == 'hapke'):
+				phi_vis_hist = np.stack(self.phi_vis_history, axis=1)
+				phi_therm_hist = np.stack(self.phi_therm_history, axis=1)
+			T_surf_hist = np.array(self.T_surf_history)
+			
+			# Ensure output times are within the simulation time range with a small buffer
+			# to avoid floating point edge cases
+			t_min = t_hist[0]
+			t_max = t_hist[-1]
+			dt = np.mean(np.diff(t_hist))  # Average time step
+			eps = dt * 1e-10  # Small fraction of a time step
+			t_out_clipped = np.clip(self.t_out, t_min + eps, t_max - eps)
+
+			try:
+				# Create interpolators with cubic splines for smoother results
+				T_interp = interp1d(t_hist, T_hist, axis=1, kind='cubic', 
 								bounds_error=True, assume_sorted=True)
-				phi_therm_interp = interp1d(t_hist, phi_therm_hist, axis=1, kind='cubic',
+				if(self.cfg.use_RTE and self.cfg.RTE_solver == 'hapke'):
+					phi_vis_interp = interp1d(t_hist, phi_vis_hist, axis=1, kind='cubic',
 									bounds_error=True, assume_sorted=True)
-			T_surf_interp = interp1d(t_hist, T_surf_hist, kind='cubic',
-								bounds_error=True, assume_sorted=True)
-			mu_interp = interp1d(t_hist, self.mu_array, kind='linear',
-								bounds_error=True, assume_sorted=True)
-			# Interpolate to clipped output times
-			self.T_out = T_interp(t_out_clipped)
-			if(self.cfg.RTE_solver == 'hapke'):
-				self.phi_vis_out = phi_vis_interp(t_out_clipped)
-				self.phi_therm_out = phi_therm_interp(t_out_clipped)
-			self.T_surf_out = T_surf_interp(t_out_clipped)
-			self.mu_array = mu_interp(t_out_clipped)
-		except ValueError as e:
-			print(f"Warning in interpolation: {e}")
-			# Fall back to linear interpolation if cubic fails
-			self.T_out = T_hist[:, -len(self.t_out):]
-			if(self.cfg.RTE_solver == 'hapke'):
-				self.phi_vis_out = phi_vis_hist[:, -len(self.t_out):]
-				self.phi_therm_out = phi_therm_hist[:, -len(self.t_out):]
-			self.T_surf_out = T_surf_hist[-len(self.t_out):]
-			self.mu_array = self.mu_array[-len(self.t_out):]
+					phi_therm_interp = interp1d(t_hist, phi_therm_hist, axis=1, kind='cubic',
+										bounds_error=True, assume_sorted=True)
+				T_surf_interp = interp1d(t_hist, T_surf_hist, kind='cubic',
+									bounds_error=True, assume_sorted=True)
+				mu_interp = interp1d(t_hist, self.mu_array, kind='linear',
+									bounds_error=True, assume_sorted=True)
+				# Interpolate to clipped output times
+				self.T_out = T_interp(t_out_clipped)
+				if(self.cfg.use_RTE and self.cfg.RTE_solver == 'hapke'):
+					self.phi_vis_out = phi_vis_interp(t_out_clipped)
+					self.phi_therm_out = phi_therm_interp(t_out_clipped)
+				self.T_surf_out = T_surf_interp(t_out_clipped)
+				self.mu_out = mu_interp(t_out_clipped)
+			except ValueError as e:
+				print(f"Warning in interpolation: {e}")
+				# Fall back to linear interpolation if cubic fails
+				self.T_out = T_hist[:, -len(self.t_out):]
+				if(self.cfg.use_RTE and self.cfg.RTE_solver == 'hapke'):
+					self.phi_vis_out = phi_vis_hist[:, -len(self.t_out):]
+					self.phi_therm_out = phi_therm_hist[:, -len(self.t_out):]
+				self.T_surf_out = T_surf_hist[-len(self.t_out):]
+				self.mu_out = self.mu_array[-len(self.t_out):]
+
+		# Always run DISORT radiance computation if needed
+		if(self.cfg.use_RTE and self.cfg.RTE_solver=='disort'):
+			#Reinitialize disort to create radiance outputs. 
+			#This will trigger the loading of new optical constants files, which optionally can 
+			# be at a higher spectral resolution. 
+			self.rte_disort = DisortRTESolver(self.cfg, self.grid,output_radiance=True)
+			if(self.cfg.multi_wave):
+				nwave = len(self.rte_disort.wavenumbers)
+				self.radiance_out = np.zeros((nwave,self.T_out.shape[1]))
+			else:
+				self.radiance_out = np.zeros(self.T_out.shape[1])
+			#Need to get interpolated T_v_depth array, mu, and F as inputs. (F should be nearest value, not interp)
+			print("Computing DISORT radiance spectra for output.")
+			for idx in range(self.T_out.shape[1]):
+				if non_diurnal:
+					F = self.F_array[-1]
+				else:
+					t_hist = np.array(self.t_history)
+					t = self.t_out[idx]
+					F_idx = np.argmin(np.abs(t_hist - t))
+					F = self.F_array[F_idx] #get nearest value for F. Don't want to interpolate and get a value that isn't 0 or 1. 
+				rad = self.rte_disort.disort_run(self.T_out[:,idx],self.mu_out[idx],F)
+				if(self.cfg.multi_wave):
+					self.radiance_out[:,idx] = rad
+				else:
+					self.radiance_out[idx] = rad
+			#Do this again to compute a smooth radiance spectrum for emissivity spectrum calculations. 
+			sim.disort_emissivity()
+
 
 	def run(self):
 		"""Execute the full time-stepping simulation."""
 		start_time = time.time()
 		
+		# Steady-state convergence settings
+		check_convergence = not self.cfg.diurnal
+		n_check = getattr(self.cfg, 'steady_n_check', 200)  # How often to check
+		window = getattr(self.cfg, 'steady_window', 100)     # How far back to look for temperature history polynomial fit. 
+		tol = getattr(self.cfg, 'steady_tol', 0.02)         # Convergence threshold (K to extremum)
+		converged = False
+
 		for j in range(self.t_num):
 			self.current_time = self.t[j]
 			self.current_step = j
 			self.mu = self.mu_array[j]
 			self.F = self.F_array[j]
-			
+
 			if j > 0:
 				# Compute radiative source term (if RTE enabled, otherwise remains zero)
 				if self.cfg.use_RTE:
@@ -243,9 +294,8 @@ class Simulator:
 						return self.T_out, self.phi_vis_out, self.phi_therm_out, self.T_surf_out, self.t_out
 				# Advance heat equation implicitly
 				self._fd1d_heat_implicit_diag()
-				# Apply boundary conditions
 				self._bc()
-			
+
 			# Store current state for interpolation
 			self.T_history.append(self.T.copy())
 			self.T_surf_history.append(self.T_surf)
@@ -253,18 +303,71 @@ class Simulator:
 			if(self.cfg.use_RTE and self.cfg.RTE_solver=='hapke'):
 				self.phi_vis_history.append(self.rte_hapke.phi_vis_prev.copy())
 				self.phi_therm_history.append(self.rte_hapke.phi_therm_prev.copy())
-			
+
+			# Steady-state convergence check (only if diurnal=False)
+			if check_convergence and (j % n_check == 0) and (len(self.T_history) >= window):
+				T_hist_fields = self.T_history[-window:]
+				T_hist_times = self.t_history[-window:]
+				T_arr = np.stack(T_hist_fields, axis=1)  # shape: (x_num, window)
+				times = np.array(T_hist_times)
+				max_dist = 0.0
+				for i in range(self.grid.x_num):
+					p = np.polyfit(times, T_arr[i], 2)  # 2nd order polynomial fit
+					# Vertex of parabola: t_ext = -b/(2a)
+					a, b, c = p
+					if a == 0:
+						t_ext = times[-1]  # Linear, fallback to last time
+					else:
+						t_ext = -b / (2 * a)
+					# Only accept extremum if it is within or just beyond the window
+					t0, t1 = times[0], times[-1]
+					if t_ext < t0:
+						t_ext = t0
+					elif t_ext > t1 + (t1-t0)/window:  # allow a small extrapolation
+						t_ext = t1
+					T_ext = a * t_ext**2 + b * t_ext + c
+					dist = abs(self.T[i] - T_ext)
+					max_dist = max(max_dist, dist)
+				print(f"[Steady-state check] step {j}, max |T - T_ext| = {max_dist:.3e} K")
+				if max_dist < tol:
+					print(f"Converged to steady-state (all |T - T_ext| < {tol}) at step {j}, t={self.current_time:.2f}s.")
+					converged = True
+					break
+
 			# Optional progress updates
-			if j % max(100, self.t_num//20) == 0:
+			if self.cfg.diurnal and j % max(100, self.t_num//20) == 0:
 				print(f"Time step {j}/{self.t_num}")
-		
+
 		# Interpolate results to desired output times
-		self._interpolate_outputs()
-		
+		self._make_outputs()
+
 		elapsed = time.time() - start_time
 		print(f"Simulation completed in {elapsed:.2f} s")
-		
+
 		return self.T_out, self.phi_vis_out, self.phi_therm_out, self.T_surf_out, self.t_out
+	
+	def disort_emissivity(self):
+		rte_disort = DisortRTESolver(self.cfg, self.grid,output_radiance=True, uniform_props = True)
+		if(self.cfg.multi_wave):
+			nwave = len(rte_disort.wavenumbers)
+			self.radiance_out_uniform = np.zeros((nwave,self.T_out.shape[1]))
+		else:
+			self.radiance_out_uniform = np.zeros(self.T_out.shape[1])
+		#Need to get interpolated T_v_depth array, mu, and F as inputs. (F should be nearest value, not interp)
+		print("Computing DISORT radiance spectra for output.")
+		for idx in range(self.T_out.shape[1]):
+			if not self.cfg.diurnal:
+				F = self.F_array[-1]
+			else:
+				t_hist = np.array(self.t_history)
+				t = self.t_out[idx]
+				F_idx = np.argmin(np.abs(t_hist - t))
+				F = self.F_array[F_idx] #get nearest value for F. Don't want to interpolate and get a value that isn't 0 or 1. 
+			rad = rte_disort.disort_run(self.T_out[:,idx],self.mu_out[idx],F)
+			if(self.cfg.multi_wave):
+				self.radiance_out_uniform[:,idx] = rad
+			else:
+				self.radiance_out_uniform[idx] = rad
 
 def emissionT(T,tau,mu):
 	T_calc = 0.0
@@ -275,29 +378,158 @@ def emissionT(T,tau,mu):
 	T_calc = T_calc/wt_calc
 	return(T_calc**0.25)
 
+def planck_wn_integrated(wn_edges, T):
+	"""
+	Integrate the Planck function over each wavenumber bin (edges in cm^-1).
+	Returns band-integrated radiance (W/m^2/sr per band).
+	"""
+	h = 6.62607015e-34  # Planck constant (J s)
+	c = 2.99792458e8    # Speed of light (m/s)
+	k = 1.380649e-23    # Boltzmann constant (J/K)
+	def planck_wn(wn, T):
+		wn_m = wn * 100.0  # Convert from cm^-1 to m^-1
+		return (2 * h * c**2 * wn_m**3) / (np.exp(h * c * wn_m / (k * T)) - 1)
+	B_bands = np.zeros(len(wn_edges)-1)
+	for i in range(len(B_bands)):
+		# Integrate over each bin
+		B_bands[i], _ = scipy.integrate.quad(planck_wn, wn_edges[i], wn_edges[i+1], args=(T,), limit=100)
+	# Removed division by bin width to match DISORT's band-integrated output
+	return B_bands*100
+
+def fit_blackbody_wn_banded(sim,wn_edges, radiance):
+	"""
+	Fit a blackbody spectrum (integrated over each wavenumber band) to the given radiance spectrum.
+	wn_edges: array of bin edges (cm^-1)
+	radiance: array of band-integrated radiances (same length as len(wn_edges)-1)
+	Returns best-fit temperature and the fitted blackbody band-integrated spectrum.
+	"""
+	wn_cutoff = 1500  # cm^-1, cutoff for fitting
+	idx = np.argmin(np.abs(sim.rte_disort.wavenumbers - wn_cutoff))
+	wn_edges = wn_edges[:idx+1]  # Use only up to the cutoff wavenumber
+	radiance = radiance[:idx]  # Corresponding radiance values
+	def loss(T):
+		B = planck_wn_integrated(wn_edges, T[0])
+		mask = (radiance > 0) & (B > 0)
+		return np.sum((np.log(radiance[mask]) - np.log(B[mask]))**2)
+	T0 = sim.T_out[1,-1]
+	minbound = sim.T_out[:,-1].min()
+	maxbound = sim.T_out[:,-1].max()
+	res = scipy.optimize.minimize(loss, [T0], bounds=[(minbound, maxbound)],)
+	T_fit = res.x[0]
+	B_fit = planck_wn_integrated(wn_edges, T_fit)
+	return T_fit, B_fit, radiance/B_fit, sim.rte_disort.wavenumbers[:idx]
+
+def fit_blackbody_mixture_wn_banded(sim, wn_edges, radiance, n_bb=3):
+	"""
+	Fit a linear mixture of n_bb blackbody spectra (integrated over each wavenumber band)
+	to the given radiance spectrum using non-negative least squares.
+	Abundances are normalized to sum to 1.
+
+	- wn_edges: array of bin edges (cm^-1)
+	- radiance: array of band-integrated radiances (len = len(wn_edges)-1)
+	- n_bb: number of blackbodies to use in the fit
+	- T_bounds: (min, max) temperature bounds for each blackbody (K)
+	Returns: best-fit temperatures, abundances, fitted spectrum
+	"""
+	wn_cutoff_high = 1600  # cm^-1, cutoff for fitting
+	wn_cutoff_low = 110
+	idx_high = np.argmin(np.abs(sim.rte_disort.wavenumbers - wn_cutoff_high))
+	idx_low = np.argmin(np.abs(sim.rte_disort.wavenumbers - wn_cutoff_low))	
+	wn_edges = np.asarray(wn_edges[idx_low:idx_high+1])  # Use only up to the cutoff wavenumber
+	radiance = np.asarray(radiance[idx_low:idx_high])
+	def loss(Ts):
+		Ts = np.sort(Ts)
+		# Build matrix of blackbody spectra (bands x n_bb)
+		B_mat = np.column_stack([planck_wn_integrated(wn_edges, T) for T in Ts])
+		# Solve for non-negative abundances
+		abund, _ = nnls(B_mat, radiance, maxiter=500)
+		#if abund.sum() > 0:
+		abund = abund / abund.sum()
+		fit = B_mat @ abund
+		# Use log space for stability, mask zeros
+		mask = (radiance > 0) & (fit > 0)
+        # Add a small regularization to encourage nonzero abundances
+		reg = 1e-4 * np.sum(abund)
+		return np.sum((np.log(radiance[mask]) - np.log(fit[mask]))**2)
+	# Bounds for all temperatures
+	T0 = sim.T_out[1,-1]
+	minbound = np.max((sim.T_out[:,-1].min() - 25.0,5.0))
+	maxbound = sim.T_out[:,-1].max() + 25.0
+	bounds = [(minbound,maxbound)] * n_bb
+	#T_init = np.linspace(minbound+50,maxbound-50, n_bb)
+	T_init = np.array([sim.T_out[1,-1], sim.T_out[10,-1],sim.T_out[20,-1]])
+	#res = scipy.optimize.minimize(loss, T_init, bounds=bounds)
+	res = differential_evolution(loss, bounds, polish=True, seed=42)
+	T_best = np.sort(res.x)
+	# Final fit with best temperatures
+	B_mat = np.column_stack([planck_wn_integrated(wn_edges, T) for T in T_best])
+	abund, _ = nnls(B_mat, radiance)
+	#if abund.sum() > 0:
+	abund = abund / abund.sum()
+	fit_spec = B_mat @ abund
+	emiss_spec = radiance / fit_spec
+	return T_best, abund, fit_spec, emiss_spec, sim.rte_disort.wavenumbers[idx_low:idx_high]
+
+import numpy as np
+from scipy.optimize import nnls
+
+def fit_multiwave_emissivity(sim, wn_edges, radiance):
+    """
+    Fit a set of blackbody spectra to DISORT radiance output to estimate an emissivity spectrum.
+    
+    Parameters:
+    - wavenum: 1D array of wavenumbers (in cm⁻¹)
+    - radiance: 1D array of observed radiance values at each wavenumber (W·cm⁻²·sr⁻¹·cm⁻¹⁻¹)
+    - temperatures: 1D array of temperatures (in K) at each layer or depth
+    
+    Returns:
+    - emissivity: 1D array of estimated emissivity spectrum
+    - fitted_radiance: 1D array of radiance reconstructed from the blackbody fit
+    - weights: 1D array of best-fit weights for each temperature layer
+    """
+    
+    # Build Planck matrix: each column is B(λ, T_i)
+    B_matrix = np.column_stack([planck_wn_integrated(wn_edges, T) for T in sim.T_out[:sim.grid.nlay_dust,-1]])
+
+    # Solve non-negative least squares: B_matrix @ weights ≈ radiance
+    weights, _ = nnls(B_matrix, radiance)
+    
+    # Reconstructed radiance
+    fitted_radiance = B_matrix @ weights
+    
+    # Estimated emissivity
+    emissivity = radiance / fitted_radiance
+    
+    return emissivity, fitted_radiance, weights
+
+
+
 if __name__ == "__main__":
 	sim = Simulator()
 	T_out, phi_vis, phi_therm, T_surf_out, t_out = sim.run()
 	import matplotlib.pyplot as plt
 
 	# Plot temperature at the surface (first grid point) over time
-	plt.figure(figsize=(10, 5))
-	if(sim.cfg.use_RTE):
-		#plt.plot(sim.t_out / 3600, (2.0*phi_therm[0,:]*np.pi/5.670e-8)**0.25, label='Phi temperature')
-		plt.plot(sim.t_out / 3600, T_out[1,:], label='Surface Temperature')
-		#emissT = emissionT(T_out[1:sim.grid.nlay_dust+1,:],sim.grid.x[1:sim.grid.nlay_dust+1],1.0)
-		emissT = np.zeros(len(sim.t_out))
-		for j in np.arange(len(sim.t_out)):
-			emissT[j] = emissionT(T_out[1:sim.grid.nlay_dust+1,j],sim.grid.x[1:sim.grid.nlay_dust+1],1.0)
-		plt.plot(sim.t_out / 3600, emissT, label='Emission Temperature')
-	else:
-		plt.plot(sim.t_out / 3600, T_surf_out, label='Surface Temperature (no RTE)')
-	plt.xlabel('Time (hours)')
-	plt.ylabel('Temperature (K)')
-	plt.title('Surface Temperature vs Time')
-	plt.legend()
-	plt.tight_layout()
-	plt.show()
+	if(sim.cfg.diurnal):
+		plt.figure(figsize=(10, 5))
+		if(sim.cfg.use_RTE):
+			#plt.plot(sim.t_out / 3600, (2.0*phi_therm[0,:]*np.pi/5.670e-8)**0.25, label='Phi temperature')
+			plt.plot(sim.t_out / 3600, T_out[1,:], label='Surface Temperature')
+			#emissT = emissionT(T_out[1:sim.grid.nlay_dust+1,:],sim.grid.x[1:sim.grid.nlay_dust+1],1.0)
+			emissT = np.zeros(len(sim.t_out))
+			for j in np.arange(len(sim.t_out)):
+				emissT[j] = emissionT(T_out[1:sim.grid.nlay_dust+1,j],sim.grid.x[1:sim.grid.nlay_dust+1],1.0)
+			plt.plot(sim.t_out / 3600, emissT, label='Emission Temperature')
+		else:
+			plt.plot(sim.t_out / 3600, T_surf_out, label='Surface Temperature (no RTE)')
+		plt.xlabel('Time (hours)')
+		plt.ylabel('Temperature (K)')
+		plt.title('Surface Temperature vs Time')
+		plt.legend()
+		plt.tight_layout()
+		plt.show()
+
+
 
 	# Plot temperature vs depth profiles for final day
 	plt.figure(figsize=(10, 6))
@@ -329,8 +561,19 @@ if __name__ == "__main__":
 	plt.legend(loc='upper right')
 	plt.grid(True)
 	plt.show()
+	if(sim.cfg.use_RTE and sim.cfg.RTE_solver=='disort'):
+		if(sim.cfg.multi_wave):
+			plt.plot(sim.rte_disort.wavenumbers,sim.radiance_out[:,-1])
+			plt.xlabel('Wavenumber [cm-1]')
+			plt.ylabel('Radiance')
+			plt.show()
+		else:
+			plt.plot(sim.t_out / 3600, sim.radiance_out)
+			plt.xlabel('Time')
+			plt.ylabel('Radiance')
+			plt.show()
 
-	if sim.cfg.RTE_solver == 'hapke':
+	if (sim.cfg.use_RTE and sim.cfg.RTE_solver == 'hapke'):
 		# For RTE quantities (phi), only plot dust layer values
 		x_dust = x[1:sim.grid.nlay_dust+1]  # Exclude virtual nodes, only dust layers
 		
@@ -358,4 +601,34 @@ if __name__ == "__main__":
 		plt.ylabel('phi_vis')
 		plt.legend(loc='upper right')
 		plt.grid(True)
+		plt.show()
+
+	# Plot final emissivity spectrum for non-diurnal, DISORT case
+	if (not sim.cfg.diurnal) and sim.cfg.use_RTE and sim.cfg.RTE_solver == 'disort' and sim.cfg.multi_wave:
+		wn = sim.rte_disort.wavenumbers  # [cm^-1], band centers
+		final_rad = sim.radiance_out[:, -1]  # Final time step
+		ir_cutoff = np.argmin(np.abs(wn - 1500))  # cm^-1, cutoff for IR bands
+		# Read bin edges from config
+		wn_bounds = np.loadtxt(sim.cfg.wn_bounds_out)
+		T_fit, B_fit, emiss_spec, wn_BB = fit_blackbody_wn_banded(sim,wn_bounds, final_rad)
+		#multi_T_fit, abund, multi_B_fit, multi_emiss_spec, multi_wn_BB= fit_blackbody_mixture_wn_banded(sim,wn_bounds, final_rad)
+		otesT1 = np.loadtxt(sim.cfg.substrate_spectrum_out)
+		otesT2 = np.loadtxt(sim.cfg.otesT2_out)
+		idx1 = np.argmin(np.abs(otesT1[:,0] - 900))
+		idx2 = np.argmin(np.abs(otesT1[:,0] - 1200))
+		otes_cf_emis = otesT1[idx1:idx2,1].max()
+		bbfit_cf_emis = emiss_spec[idx1:idx2].max()
+		ds_cf_emis = (final_rad/sim.radiance_out_uniform[:, -1])[idx1:idx2].max()
+		plt.figure()
+		plt.plot(wn_BB, emiss_spec + otes_cf_emis - bbfit_cf_emis, label=f'Emissivity (T_fit={T_fit:.1f} K)')
+		#plt.plot(multi_wn_BB, multi_emiss_spec, label=f'Mixture Emissivity (T_fit={multi_T_fit})')
+		plt.plot(wn[:ir_cutoff], (final_rad/sim.radiance_out_uniform[:, -1])[:ir_cutoff]+otes_cf_emis - ds_cf_emis, label='DISORT emissivity')
+		plt.plot(wn[:ir_cutoff], otesT1[:ir_cutoff,1], label='OTES T1 (less dust) Spectrum')
+		plt.plot(wn[:ir_cutoff], otesT2[:ir_cutoff,1], label='OTES T1 (less dust) Spectrum')
+		plt.xlabel('Wavenumber [cm$^{-1}$]')
+		plt.ylabel('Emissivity')
+		plt.title('Final Emissivity Spectrum (Radiance / Best-fit Blackbody, band-integrated)')
+		plt.legend()
+		plt.grid(True)
+		plt.gca().invert_xaxis()
 		plt.show()
