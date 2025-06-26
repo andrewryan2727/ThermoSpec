@@ -304,6 +304,10 @@ class Simulator:
 				self.phi_vis_history.append(self.rte_hapke.phi_vis_prev.copy())
 				self.phi_therm_history.append(self.rte_hapke.phi_therm_prev.copy())
 
+			# Terminate here for fixed temperature run, saving outputs at initialization temperature. 
+			if(self.cfg.T_fixed and not self.cfg.diurnal):
+				break
+
 			# Steady-state convergence check (only if diurnal=False)
 			if check_convergence and (j % n_check == 0) and (len(self.T_history) >= window):
 				T_hist_fields = self.T_history[-window:]
@@ -419,89 +423,6 @@ def fit_blackbody_wn_banded(sim,wn_edges, radiance):
 	B_fit = planck_wn_integrated(wn_edges, T_fit)
 	return T_fit, B_fit, radiance/B_fit, sim.rte_disort.wavenumbers[:idx]
 
-def fit_blackbody_mixture_wn_banded(sim, wn_edges, radiance, n_bb=3):
-	"""
-	Fit a linear mixture of n_bb blackbody spectra (integrated over each wavenumber band)
-	to the given radiance spectrum using non-negative least squares.
-	Abundances are normalized to sum to 1.
-
-	- wn_edges: array of bin edges (cm^-1)
-	- radiance: array of band-integrated radiances (len = len(wn_edges)-1)
-	- n_bb: number of blackbodies to use in the fit
-	- T_bounds: (min, max) temperature bounds for each blackbody (K)
-	Returns: best-fit temperatures, abundances, fitted spectrum
-	"""
-	wn_cutoff_high = 1600  # cm^-1, cutoff for fitting
-	wn_cutoff_low = 110
-	idx_high = np.argmin(np.abs(sim.rte_disort.wavenumbers - wn_cutoff_high))
-	idx_low = np.argmin(np.abs(sim.rte_disort.wavenumbers - wn_cutoff_low))	
-	wn_edges = np.asarray(wn_edges[idx_low:idx_high+1])  # Use only up to the cutoff wavenumber
-	radiance = np.asarray(radiance[idx_low:idx_high])
-	def loss(Ts):
-		Ts = np.sort(Ts)
-		# Build matrix of blackbody spectra (bands x n_bb)
-		B_mat = np.column_stack([planck_wn_integrated(wn_edges, T) for T in Ts])
-		# Solve for non-negative abundances
-		abund, _ = nnls(B_mat, radiance, maxiter=500)
-		#if abund.sum() > 0:
-		abund = abund / abund.sum()
-		fit = B_mat @ abund
-		# Use log space for stability, mask zeros
-		mask = (radiance > 0) & (fit > 0)
-        # Add a small regularization to encourage nonzero abundances
-		reg = 1e-4 * np.sum(abund)
-		return np.sum((np.log(radiance[mask]) - np.log(fit[mask]))**2)
-	# Bounds for all temperatures
-	T0 = sim.T_out[1,-1]
-	minbound = np.max((sim.T_out[:,-1].min() - 25.0,5.0))
-	maxbound = sim.T_out[:,-1].max() + 25.0
-	bounds = [(minbound,maxbound)] * n_bb
-	#T_init = np.linspace(minbound+50,maxbound-50, n_bb)
-	T_init = np.array([sim.T_out[1,-1], sim.T_out[10,-1],sim.T_out[20,-1]])
-	#res = scipy.optimize.minimize(loss, T_init, bounds=bounds)
-	res = differential_evolution(loss, bounds, polish=True, seed=42)
-	T_best = np.sort(res.x)
-	# Final fit with best temperatures
-	B_mat = np.column_stack([planck_wn_integrated(wn_edges, T) for T in T_best])
-	abund, _ = nnls(B_mat, radiance)
-	#if abund.sum() > 0:
-	abund = abund / abund.sum()
-	fit_spec = B_mat @ abund
-	emiss_spec = radiance / fit_spec
-	return T_best, abund, fit_spec, emiss_spec, sim.rte_disort.wavenumbers[idx_low:idx_high]
-
-import numpy as np
-from scipy.optimize import nnls
-
-def fit_multiwave_emissivity(sim, wn_edges, radiance):
-    """
-    Fit a set of blackbody spectra to DISORT radiance output to estimate an emissivity spectrum.
-    
-    Parameters:
-    - wavenum: 1D array of wavenumbers (in cm⁻¹)
-    - radiance: 1D array of observed radiance values at each wavenumber (W·cm⁻²·sr⁻¹·cm⁻¹⁻¹)
-    - temperatures: 1D array of temperatures (in K) at each layer or depth
-    
-    Returns:
-    - emissivity: 1D array of estimated emissivity spectrum
-    - fitted_radiance: 1D array of radiance reconstructed from the blackbody fit
-    - weights: 1D array of best-fit weights for each temperature layer
-    """
-    
-    # Build Planck matrix: each column is B(λ, T_i)
-    B_matrix = np.column_stack([planck_wn_integrated(wn_edges, T) for T in sim.T_out[:sim.grid.nlay_dust,-1]])
-
-    # Solve non-negative least squares: B_matrix @ weights ≈ radiance
-    weights, _ = nnls(B_matrix, radiance)
-    
-    # Reconstructed radiance
-    fitted_radiance = B_matrix @ weights
-    
-    # Estimated emissivity
-    emissivity = radiance / fitted_radiance
-    
-    return emissivity, fitted_radiance, weights
-
 
 
 if __name__ == "__main__":
@@ -612,7 +533,8 @@ if __name__ == "__main__":
 		wn_bounds = np.loadtxt(sim.cfg.wn_bounds_out)
 		T_fit, B_fit, emiss_spec, wn_BB = fit_blackbody_wn_banded(sim,wn_bounds, final_rad)
 		#multi_T_fit, abund, multi_B_fit, multi_emiss_spec, multi_wn_BB= fit_blackbody_mixture_wn_banded(sim,wn_bounds, final_rad)
-		otesT1 = np.loadtxt(sim.cfg.substrate_spectrum_out)
+		otes_samp = np.loadtxt(sim.cfg.substrate_spectrum_out)
+		otesT1 = np.loadtxt(sim.cfg.otesT1_out)
 		otesT2 = np.loadtxt(sim.cfg.otesT2_out)
 		idx1 = np.argmin(np.abs(otesT1[:,0] - 900))
 		idx2 = np.argmin(np.abs(otesT1[:,0] - 1200))
@@ -620,11 +542,12 @@ if __name__ == "__main__":
 		bbfit_cf_emis = emiss_spec[idx1:idx2].max()
 		ds_cf_emis = (final_rad/sim.radiance_out_uniform[:, -1])[idx1:idx2].max()
 		plt.figure()
-		plt.plot(wn_BB, emiss_spec + otes_cf_emis - bbfit_cf_emis, label=f'Emissivity (T_fit={T_fit:.1f} K)')
+		#plt.plot(wn_BB, emiss_spec + otes_cf_emis - bbfit_cf_emis, label=f'Emissivity (T_fit={T_fit:.1f} K)')
 		#plt.plot(multi_wn_BB, multi_emiss_spec, label=f'Mixture Emissivity (T_fit={multi_T_fit})')
-		plt.plot(wn[:ir_cutoff], (final_rad/sim.radiance_out_uniform[:, -1])[:ir_cutoff]+otes_cf_emis - ds_cf_emis, label='DISORT emissivity')
-		plt.plot(wn[:ir_cutoff], otesT1[:ir_cutoff,1], label='OTES T1 (less dust) Spectrum')
-		plt.plot(wn[:ir_cutoff], otesT2[:ir_cutoff,1], label='OTES T1 (less dust) Spectrum')
+		plt.plot(wn[:ir_cutoff], (final_rad/sim.radiance_out_uniform[:, -1])[:ir_cutoff]+otes_cf_emis - ds_cf_emis, label='DISORT emissivity',linewidth=3)
+		plt.plot(wn[:ir_cutoff], otes_samp[:ir_cutoff,1], label='OTES sample hummocky',linewidth=1)
+		plt.plot(wn[:ir_cutoff], otesT1[:ir_cutoff,1], label='OTES T1 (more dust)')
+		plt.plot(wn[:ir_cutoff], otesT2[:ir_cutoff,1], label='OTES T2 (less dust)')
 		plt.xlabel('Wavenumber [cm$^{-1}$]')
 		plt.ylabel('Emissivity')
 		plt.title('Final Emissivity Spectrum (Radiance / Best-fit Blackbody, band-integrated)')

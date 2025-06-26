@@ -175,9 +175,10 @@ class DisortRTESolver:
             op.ds().nstr = self.cfg.nstr
             op.ds().nphase = self.cfg.nmom
         if(self.cfg.multi_wave):
-            lower, upper = self._compute_wn_bounds()
-            op.wave_lower(lower)
-            op.wave_upper(upper)
+            self.lower_wns, self.upper_wns = self._compute_wn_bounds()
+            self.wn_bin_widths = np.array(self.upper_wns) - np.array(self.lower_wns)
+            op.wave_lower(self.lower_wns)
+            op.wave_upper(self.upper_wns)
         else:
             #Broadband. Define range for planck function to a very wide range. 
             op.wave_lower([20]) #500 µm
@@ -233,6 +234,16 @@ class DisortRTESolver:
         #Run disort. 
         result = self.ds.forward(self.prop,'', T_tensor, **bc)
 
+        #DISORT outputs from the gather_flx() method are: 
+        # 0.	RFLDIR(lu) - Direct-beam flux (without delta-M scaling)
+        # 1.	RFLDN(lu) - Diffuse down-flux (total minus direct-beam) (without delta-M scaling)
+        # 2.	FLUP(lu) - Diffuse up-flux – same as first output of pydisort output
+        # 3.	DFDT(lu) - Flux divergence  d(net flux)/d(optical depth),where 'net flux' includes the direct beam. An exact result;  not from differencing fluxes)
+        # 4.	UAVG(lu) - Mean intensity (including the direct beam)  (Not corrected for delta-M-scaling effects)
+        # 5.	UU(iu,lu,j) - Intensity ( if ONLYFL = FALSE;  zero otherwise )
+        # 6.	ALBMED(iu) - Albedo of the medium as a function of incident beam angle cosine UMU(IU)  (IBCND = 1 case only)
+        # 7.	TRNMED(iu) - Transmissivity of the medium as a function of incident beam angle cosine UMU(IU)  (IBCND = 1 case only)
+
         # Up stream minus down stream. 
         #F_net = result[0,0,:,0] - result[0,0,:,1] 
         # Calculate heating rate as flux divergence
@@ -241,10 +252,12 @@ class DisortRTESolver:
             rad = self.ds.gather_rad()
             return(rad[:,0,0,0,0])
         else:
-            #flux divergence from disort. According to documention, this is an exact result not from differencing of fluxes. 
+            #Get flux divergence. 
             if(self.cfg.multi_wave):
                 #Summation of the different wavelengths
-                Q_rad = torch.sum(self.ds.gather_flx()[:,0,:,3],dim=0)
+                flux_divergence = self.ds.gather_flx()[:,0,:,3]
+                bin_weight = torch.tensor(self.wn_bin_widths).unsqueeze(1) / np.sum(self.wn_bin_widths)
+                Q_rad = torch.sum(flux_divergence*bin_weight,dim=0)
             else:
                 Q_rad = self.ds.gather_flx()[0,0,:,3]
             Q_rad_interp = np.interp(self.grid.x_RTE,self.grid.x_boundaries,Q_rad)
