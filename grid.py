@@ -204,7 +204,13 @@ class LayerGrid:
             dens[:self.nlay_dust] = cfg.rho_dust
             heat[:self.nlay_dust] = cfg.cp_dust
 
-            # Interface harmonic mean
+            # if(cfg.use_RTE and cfg.RTE_solver=='disort'):
+            #     K[self.nlay_dust] = K_rock
+            #     cond[self.nlay_dust] = cfg.k_rock * cfg.Et**2
+            #     dens[self.nlay_dust] = cfg.rho_rock
+            #     heat[self.nlay_dust] = cfg.cp_rock
+            # else:
+            # # Interface harmonic mean
             K[self.nlay_dust] = 2/(1/K_dust + 1/K_rock)
             cond[self.nlay_dust] = 2/(1/(cfg.k_dust*cfg.Et**2) + 1/(cfg.k_rock*cfg.Et**2))
             dens[self.nlay_dust] = 2/(1/cfg.rho_dust + 1/cfg.rho_rock)

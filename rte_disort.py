@@ -1,6 +1,7 @@
 import numpy as np
 from pydisort import Disort, DisortOptions, scattering_moments
 import torch
+import scipy.integrate
 
 from config import SimulationConfig
 from grid import LayerGrid
@@ -61,7 +62,7 @@ class DisortRTESolver:
 
     def _setup_optical_properties(self):
         """Set up optical properties for DISORT"""
-        n_layers = len(self.grid.dtau)
+        n_layers = len(self.grid.x_RTE[:-1])
         tau_layer = torch.tensor(self.grid.dtau)
         ssa_layer = torch.full((n_layers,), self.cfg.ssalb_vis)
         moms = scattering_moments(self.cfg.nmom, "henyey-greenstein", self.cfg.g)
@@ -80,7 +81,7 @@ class DisortRTESolver:
         """Set up optical properties for DISORT
            Handles wavelength-dependent and/or depth-dependent scenarios
            Must specify input file paths in config file."""
-        n_layers = len(self.grid.dtau)
+        n_layers = len(self.grid.x_RTE[:-1]) #excluding the node right at the boundary. 
         n_waves = len(self.wavenumbers) if self.cfg.multi_wave else 1
         n_mom = self.cfg.nmom 
         n_cols = 1 #number of columns. Always 1 unless we add variations in the future for different properties but at the same wavelength. 
@@ -116,25 +117,33 @@ class DisortRTESolver:
                 # Uniform properties with depth
                 if self.cfg.multi_wave:
                     #Calculate dtau at this wavelength using the extinction cross section Cext
-                    node_depth_meters = (self.grid.x_RTE/self.cfg.Et)
+                    node_depth_meters = (self.grid.x_RTE[:-1]/self.cfg.Et) #depth at center of each layer. 
                     Vp = (4./3.)*np.pi*self.cfg.radius**3. #particle volume, m^3
                     n_p= self.cfg.fill_frac / Vp #number of particles /m3
                     Et = n_p * self.Cext_array[i_wave]*1e-12 #extinction coefficient at this wavelength, converting Cext from µm^2 to m^2 in the process. 
                     if(self.uniform_props):
                         Et = n_p * np.mean(self.Cext_array[self.wn_min:self.wn_max])*1e-12
-                    #Et = Et*0.0 + 9000
-                    tau = node_depth_meters*Et
-                    dtau = np.insert(np.diff(tau),0,tau[0]*2)
+                    Et = Et*0.0 + 500.0 #Override for testing. 
+                    tau = node_depth_meters*Et #tau in center of each layer.
+                    tau_boundaries = Et*self.grid.x_boundaries[:-1]/self.cfg.Et #tau at boundaries of each layer 
+                    #dtau = np.insert(np.diff(tau),0,tau[0]*2)
+                    dtau = tau_boundaries[1:] - tau_boundaries[:-1] #tau at boundaries of each layer
                     tau_layer = torch.tensor(dtau,dtype=torch.float64)
                     ssalb_val = self.ssalb_array[i_wave].copy()
+                    if(self.cfg.force_vis_disort and self.wavenumbers[i_wave] >3330.0):
+                        #Force all visible wavelengths to use the DISORT default value for visible scattering albedo
+                        ssalb_val = self.cfg.disort_ssalb_vis
                     if(self.uniform_props):
                         ssalb_val = np.mean(self.ssalb_array[self.wn_min:self.wn_max])
-                    #ssalb_val = ssalb_val*0.0 + 0.1
+                    #ssalb_val = ssalb_val*0.0 + 0.5 #override for testing. 
                     ssa_layer = torch.full([n_layers], ssalb_val,dtype=torch.float64)
                     #g_layer = np.full(n_layers, self.cfg.g[i_wave])
                     # Moments same for all layers
                     #moms = self.alpha1_array[i_wave,:]
                     g_val = self.g_array[i_wave]
+                    if(self.cfg.force_vis_disort and self.wavenumbers[i_wave] >3330.0):
+                        #Force all visible wavelengths to use the DISORT default value for visible scattering asymmetry factor
+                        g_val = self.cfg.disort_g_vis
                     if(self.uniform_props):
                         g_val = np.mean(self.g_array[self.wn_min:self.wn_max])
                     moms = scattering_moments(self.cfg.nmom, "henyey-greenstein", g_val)
@@ -177,6 +186,7 @@ class DisortRTESolver:
         if(self.cfg.multi_wave):
             self.lower_wns, self.upper_wns = self._compute_wn_bounds()
             self.wn_bin_widths = np.array(self.upper_wns) - np.array(self.lower_wns)
+            self.wn_bins = np.append(self.lower_wns,self.upper_wns[-1])
             op.wave_lower(self.lower_wns)
             op.wave_upper(self.upper_wns)
         else:
@@ -185,7 +195,7 @@ class DisortRTESolver:
             op.wave_upper([10000]) #1 µm
         n_waves = len(self.wavenumbers) if self.cfg.multi_wave else 1
         op.nwave(n_waves)
-        op.ds().nlyr = len(self.grid.dtau)
+        op.ds().nlyr = len(self.grid.x_RTE[:-1])
 
         return op
 
@@ -194,12 +204,14 @@ class DisortRTESolver:
             file = self.cfg.wn_bounds_out
         else:
             file = self.cfg.wn_bounds
-        wn_boudns = np.loadtxt(file)
-        if(len(wn_boudns) != len(self.wavenumbers)+1):
-            raise ValueError(f"Expected {len(self.wavenumbers)+1} wavenumber bounds, got {len(wn_boudns)} from {file}.")
-        lower_bounds = wn_boudns[:-1].tolist()  # lower edge for each bin
-        upper_bounds = wn_boudns[1:].tolist()   # upper edge for each bin
+        wn_bounds = np.loadtxt(file)
+        if(len(wn_bounds) != len(self.wavenumbers)+1):
+            raise ValueError(f"Expected {len(self.wavenumbers)+1} wavenumber bounds, got {len(wn_bounds)} from {file}.")
+        lower_bounds = wn_bounds[:-1].tolist()  # lower edge for each bin
+        upper_bounds = wn_bounds[1:].tolist()   # upper edge for each bin
         return lower_bounds, upper_bounds
+    
+
 
     def disort_run(self,  T, mu, F ):
         #Solve RTE using DISORT for both visible and thermal bands.
@@ -228,7 +240,7 @@ class DisortRTESolver:
         
         #Need to interpolate temperature field to be at boundaries of computational layers, rather than at the center.
         #Assuming that the temperature grid is sufficiently dense to allow for a fast linear interpolation.  
-        T_interp = np.interp(self.grid.x_boundaries,self.grid.x_RTE,T[1:self.grid.nlay_dust+1])
+        T_interp = np.interp(self.grid.x_boundaries[:-1],self.grid.x_RTE[:-1],T[1:self.grid.nlay_dust])
         T_tensor = torch.tensor(T_interp).unsqueeze(0)
 
         #Run disort. 
@@ -253,16 +265,40 @@ class DisortRTESolver:
             return(rad[:,0,0,0,0])
         else:
             #Get flux divergence. 
+            flx = self.ds.gather_flx()
             if(self.cfg.multi_wave):
                 #Summation of the different wavelengths
-                flux_divergence = self.ds.gather_flx()[:,0,:,3]
+                flux_divergence = flx[:,0,:,3]
                 bin_weight = torch.tensor(self.wn_bin_widths).unsqueeze(1) / np.sum(self.wn_bin_widths)
-                Q_rad = torch.sum(flux_divergence*bin_weight,dim=0)
+                #Q_rad = torch.sum(flux_divergence*bin_weight,dim=0)
+                Q_rad = torch.sum(flux_divergence,dim=0)
             else:
-                Q_rad = self.ds.gather_flx()[0,0,:,3]
-            Q_rad_interp = np.interp(self.grid.x_RTE,self.grid.x_boundaries,Q_rad)
+                Q_rad = flx[0,0,:,3]
+            Q_rad_interp = np.interp(self.grid.x_RTE[:-1],self.grid.x_boundaries[:-1],Q_rad)
             source = np.zeros(self.grid.x_num)
-            source[1:self.grid.nlay_dust+1] = Q_rad_interp
-            source_term = source * self.grid.K * self.cfg.q        
+            source[1:self.grid.nlay_dust] = Q_rad_interp
+            #Update the source at the dust/rock boundary to account for direct solar flux and thermal emission. 
+            #source[self.grid.nlay_dust] = 0.0
+            emission = np.pi*np.sum(planck_wn_integrated(self.wn_bins,T[self.grid.nlay_dust])*self.emiss_base)
+            source_term = source * self.grid.K * self.cfg.q
+            #Radiative flux source term at the rock/dust boundary. They are not multipled by Kq because they are not volumetric. 
+            #source_term[self.grid.nlay_dust] = torch.sum((flx[:,0,-1,0] + flx[:,0,-1,1]),dim=0)-emission
             return source_term
 
+def planck_wn_integrated(wn_edges, T):
+    """
+    Integrate the Planck function over each wavenumber bin (edges in cm^-1).
+    Returns band-integrated radiance (W/m^2/sr per band).
+    """
+    h = 6.62607015e-34  # Planck constant (J s)
+    c = 2.99792458e8    # Speed of light (m/s)
+    k = 1.380649e-23    # Boltzmann constant (J/K)
+    def planck_wn(wn, T):
+        wn_m = wn * 100.0  # Convert from cm^-1 to m^-1
+        return (2 * h * c**2 * wn_m**3) / (np.exp(h * c * wn_m / (k * T)) - 1)
+    B_bands = np.zeros(len(wn_edges)-1)
+    for i in range(len(B_bands)):
+        # Integrate over each bin
+        B_bands[i], _ = scipy.integrate.quad(planck_wn, wn_edges[i], wn_edges[i+1], args=(T,), limit=100)
+    # Removed division by bin width to match DISORT's band-integrated output
+    return B_bands*100

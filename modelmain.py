@@ -246,7 +246,8 @@ class Simulator:
 				self.radiance_out = np.zeros((nwave,self.T_out.shape[1]))
 			else:
 				self.radiance_out = np.zeros(self.T_out.shape[1])
-			#Need to get interpolated T_v_depth array, mu, and F as inputs. (F should be nearest value, not interp)
+			self.rad_T_out = np.zeros(self.T_out.shape[1])  #Temperature computed from radiance blackbody fit. 
+			wn_bounds = np.loadtxt(self.cfg.wn_bounds_out)
 			print("Computing DISORT radiance spectra for output.")
 			for idx in range(self.T_out.shape[1]):
 				if non_diurnal:
@@ -258,9 +259,11 @@ class Simulator:
 					F = self.F_array[F_idx] #get nearest value for F. Don't want to interpolate and get a value that isn't 0 or 1. 
 				rad = self.rte_disort.disort_run(self.T_out[:,idx],self.mu_out[idx],F)
 				if(self.cfg.multi_wave):
-					self.radiance_out[:,idx] = rad
+					self.radiance_out[:,idx] = rad.numpy()
 				else:
-					self.radiance_out[idx] = rad
+					self.radiance_out[idx] = rad.numpy()
+				#TO DO: Figure out why radiance only varies a tiny bit....
+				self.rad_T_out[idx], _, _, _ = fit_blackbody_wn_banded(self,wn_bounds, rad.numpy(),idx=idx)
 			#Do this again to compute a smooth radiance spectrum for emissivity spectrum calculations. 
 			sim.disort_emissivity()
 
@@ -358,7 +361,7 @@ class Simulator:
 		else:
 			self.radiance_out_uniform = np.zeros(self.T_out.shape[1])
 		#Need to get interpolated T_v_depth array, mu, and F as inputs. (F should be nearest value, not interp)
-		print("Computing DISORT radiance spectra for output.")
+		print("Computing DISORT emissivity spectra for output.")
 		for idx in range(self.T_out.shape[1]):
 			if not self.cfg.diurnal:
 				F = self.F_array[-1]
@@ -400,7 +403,7 @@ def planck_wn_integrated(wn_edges, T):
 	# Removed division by bin width to match DISORT's band-integrated output
 	return B_bands*100
 
-def fit_blackbody_wn_banded(sim,wn_edges, radiance):
+def fit_blackbody_wn_banded(sim,wn_edges, radiance,idx=-1):
 	"""
 	Fit a blackbody spectrum (integrated over each wavenumber band) to the given radiance spectrum.
 	wn_edges: array of bin edges (cm^-1)
@@ -408,16 +411,16 @@ def fit_blackbody_wn_banded(sim,wn_edges, radiance):
 	Returns best-fit temperature and the fitted blackbody band-integrated spectrum.
 	"""
 	wn_cutoff = 1500  # cm^-1, cutoff for fitting
-	idx = np.argmin(np.abs(sim.rte_disort.wavenumbers - wn_cutoff))
-	wn_edges = wn_edges[:idx+1]  # Use only up to the cutoff wavenumber
-	radiance = radiance[:idx]  # Corresponding radiance values
+	indx = np.argmin(np.abs(sim.rte_disort.wavenumbers - wn_cutoff))
+	wn_edges = wn_edges[:indx+1]  # Use only up to the cutoff wavenumber
+	radiance = radiance[:indx]  # Corresponding radiance values
 	def loss(T):
 		B = planck_wn_integrated(wn_edges, T[0])
 		mask = (radiance > 0) & (B > 0)
 		return np.sum((np.log(radiance[mask]) - np.log(B[mask]))**2)
-	T0 = sim.T_out[1,-1]
-	minbound = sim.T_out[:,-1].min()
-	maxbound = sim.T_out[:,-1].max()
+	T0 = sim.T_out[1,idx]
+	minbound = sim.T_out[:,idx].min()
+	maxbound = sim.T_out[:,idx].max()
 	res = scipy.optimize.minimize(loss, [T0], bounds=[(minbound, maxbound)],)
 	T_fit = res.x[0]
 	B_fit = planck_wn_integrated(wn_edges, T_fit)
@@ -441,6 +444,8 @@ if __name__ == "__main__":
 			for j in np.arange(len(sim.t_out)):
 				emissT[j] = emissionT(T_out[1:sim.grid.nlay_dust+1,j],sim.grid.x[1:sim.grid.nlay_dust+1],1.0)
 			plt.plot(sim.t_out / 3600, emissT, label='Emission Temperature')
+			if(sim.cfg.RTE_solver == 'disort'):
+				plt.plot(sim.t_out / 3600, sim.rad_T_out, label='Radiance Fit Temperature')
 		else:
 			plt.plot(sim.t_out / 3600, T_surf_out, label='Surface Temperature (no RTE)')
 		plt.xlabel('Time (hours)')
@@ -482,17 +487,17 @@ if __name__ == "__main__":
 	plt.legend(loc='upper right')
 	plt.grid(True)
 	plt.show()
-	if(sim.cfg.use_RTE and sim.cfg.RTE_solver=='disort'):
-		if(sim.cfg.multi_wave):
-			plt.plot(sim.rte_disort.wavenumbers,sim.radiance_out[:,-1])
-			plt.xlabel('Wavenumber [cm-1]')
-			plt.ylabel('Radiance')
-			plt.show()
-		else:
-			plt.plot(sim.t_out / 3600, sim.radiance_out)
-			plt.xlabel('Time')
-			plt.ylabel('Radiance')
-			plt.show()
+	# if(sim.cfg.use_RTE and sim.cfg.RTE_solver=='disort'):
+	# 	if(sim.cfg.multi_wave):
+	# 		plt.plot(sim.rte_disort.wavenumbers,sim.radiance_out[:,-1])
+	# 		plt.xlabel('Wavenumber [cm-1]')
+	# 		plt.ylabel('Radiance')
+	# 		plt.show()
+	# 	else:
+	# 		plt.plot(sim.t_out / 3600, sim.radiance_out)
+	# 		plt.xlabel('Time')
+	# 		plt.ylabel('Radiance')
+	# 		plt.show()
 
 	if (sim.cfg.use_RTE and sim.cfg.RTE_solver == 'hapke'):
 		# For RTE quantities (phi), only plot dust layer values
