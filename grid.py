@@ -36,18 +36,22 @@ class LayerGrid:
                 L = cfg.dust_thickness * cfg.Et #Total dust column thickness, converted to tau units
                 x_nodes = [-dust_lthick/2.] #virtual node. 
 
+                l_thick = [dust_lthick]  # List to store layer thicknesses
 
                 # keep adding nodes until the next would go past L
                 while x_nodes[-1] + s < L:
                     x_nodes.append(x_nodes[-1] + s)
+                    l_thick.append(s)
                     s *= cfg.spacing_factor  # increase spacing by factor
 
                 last = L + (L - x_nodes[-1])
+                l_thick.append(2*(L - x_nodes[-1]))  # last layer thickness
                 x_nodes.append(last)
    
                 x = np.array(x_nodes)
                 x_num = len(x)
                 self.nlay_dust = x_num-2  # For RTE, exclude virtual top/bottom nodes
+                self.l_thick = np.array(l_thick)  
 
             else:
                 # Uniform layer thickness. 
@@ -69,6 +73,9 @@ class LayerGrid:
                 for i in range(2, self.nlay_dust):
                     x[i] = x[i-1] + dust_lthick
 
+                self.l_thick = np.zeros(x_num)
+                self.l_thick[:] = dust_lthick  # Set layer thicknesses
+
                 #Ensure last real node is in the correct position, accouting for changes due to rounding in conversion from m to tau. 
                 x[-2] = cfg.dust_thickness * cfg.Et - dust_lthick / 2.0
                 x[-1] = x[-2] + dust_lthick
@@ -80,50 +87,58 @@ class LayerGrid:
             nlay_dust_init = int(round(dust_tau / dust_lthick))
             # revise actual layer thickness to match integer layer count
             dust_lthick = dust_tau / nlay_dust_init
-            self.nlay_dust = nlay_dust_init + 1
+            self.nlay_dust = nlay_dust_init
 
             # Ensure minimum number of nodes in dust column
             if(self.nlay_dust < cfg.min_nlay_dust):
                 dust_lthick = dust_tau / cfg.min_nlay_dust
-                self.nlay_dust = cfg.min_nlay_dust + 1
+                self.nlay_dust = cfg.min_nlay_dust
 
             # Rock layer count and thickness in tau units
-            nlay_rock = int(round(cfg.rock_thickness / rock_lthick))
             rock_tau = cfg.rock_thickness * cfg.Et
-            rock_lthick_tau = rock_tau / nlay_rock
-            self.nlay_rock = nlay_rock
+            rock_lthick_tau = rock_lthick*cfg.Et
 
-            # Total nodes (including virtual top/bottom)
-            x_num = self.nlay_dust + self.nlay_rock + 3
-            x = np.zeros(x_num)
 
             # Virtual top node and first real node in dust
-            x[0] = -dust_lthick / 2.0
-            x[1] = dust_lthick / 2.0
-            for i in range(2, self.nlay_dust):
-                x[i] = x[i-1] + dust_lthick
+            x = [-dust_lthick / 2.0] #virtual node on top. 
+            l_thick = [dust_lthick]
+            x.append(dust_lthick / 2.0) #First real dust node. 
+            l_thick.append(dust_lthick)  
+            for i in range(2, self.nlay_dust+1):
+                x.append(x[-1] + dust_lthick)
+                l_thick.append(dust_lthick)
+
+
+            s = rock_lthick_tau  #first rock layer thickness, tau units. 
+            L = dust_tau + rock_tau #Total dust column thickness in tau units. 
+            x_nodes = [-dust_lthick/2.] #virtual node. 
+
+            x.append(x[-1] + dust_lthick/2. + s/2.)  #First rock node
+            l_thick.append(s)  
+            s *= cfg.spacing_factor
+
+            #Rock node spacing increased geometrically. 
+            # keep adding nodes until the next would go past L
+            while x[-1] + s < L:
+                x.append(x[-1] + s)
+                l_thick.append(s)
+                s *= cfg.spacing_factor  # increase spacing by factor
             
-            # Node at dust/rock interface
-            x[self.nlay_dust] = cfg.dust_thickness * cfg.Et
+            last = L + (L - x[-1])
+            x.append(last) #Add final virtual node. 
+            l_thick.append(2*(L - x[-1]))
+            x = np.array(x)
+            x_num = len(x)
+            self.l_thick = np.array(l_thick)  # Store layer thicknesses
+            
 
-            # First two rock nodes
-            x[self.nlay_dust+1] = 2.0*x[self.nlay_dust] - x[self.nlay_dust-1]
-            x[self.nlay_dust+2] = x[self.nlay_dust+1] + 0.5*dust_lthick + 0.5*rock_lthick_tau
-            # Remaining rock layers
-            for i in range(self.nlay_dust+3, self.nlay_dust + self.nlay_rock + 3):
-                x[i] = x[i-1] + rock_lthick_tau
-
-            # Adjust bottom nodes exactly
-            x[-2] = (cfg.dust_thickness + cfg.rock_thickness) * cfg.Et
-            if x[-1] < x[-2]:
-                x[-1] = x[-2] + rock_lthick_tau
 
         # Store coordinates and counts
         self.x = x #depth in tau units
         self.x_RTE = x[1:-1].copy() if cfg.single_layer else x[1:self.nlay_dust+1].copy()
         self.x_orig = x.copy()
         self.x_num = x_num
-        self.dtau = np.insert(np.diff(self.x_RTE),0,self.x_RTE[0]*2) #Array of thickness values of computational layers, for disort. 
+        self.dtau = np.insert(np.diff(self.x_RTE),0,self.x_RTE[0]*2) #Array of thickness values of computational layers, for disort. Assumed uniform thickness.  
         #Calculate coordinates at the edge of each computational layer, for disort. 
         x_boundaries = np.zeros(len(self.dtau)+1)
         for i in np.arange(len(self.dtau)):
@@ -149,7 +164,7 @@ class LayerGrid:
                 dust_lthick = (cfg.dust_skin_depth * cfg.flay) #in tau units
                 nlay = cfg.dust_thickness * cfg.Et / dust_lthick #approx number of layers in dust column
                 if(nlay < cfg.min_nlay_dust):
-                    #If we have less than 10 layers, increase the layer thickness to ensure sufficient resolution.
+                    #If we have less than the minimum number of required layers, increase the layer thickness to ensure sufficient resolution.
                     dust_lthick = (cfg.dust_thickness * cfg.Et) / cfg.min_nlay_dust
                 #Rock layer thickness is based on skin depth
                 #This often leads to excessively thick rock layers in a two-layer scenario, so we use a factor to reduce it.
@@ -171,15 +186,15 @@ class LayerGrid:
         x = self.x
         x_num = len(x)
 
-
         # Layer thickness array
-        lthick = np.zeros(x_num)
-        lthick[1:-1] = (
-            (x[1:-1] + 0.5*(x[2:] - x[1:-1]))
-            - (x[1:-1] - 0.5*(x[1:-1] - x[0:-2]))
-        )
-        lthick[0] = x[1] - x[0]
-        lthick[-1] = x[-1] - x[-2]
+        # lthick = np.zeros(x_num)
+        # lthick[1:-1] = (
+        #     (x[1:-1] + 0.5*(x[2:] - x[1:-1]))
+        #     - (x[1:-1] - 0.5*(x[1:-1] - x[0:-2]))
+        # )
+        # lthick[0] = x[1] - x[0]
+        # lthick[-1] = x[-1] - x[-2]
+        lthick = self.l_thick
 
         # Diffusivity for dust and rock
         K_dust = cfg.k_dust * cfg.Et**2 / (cfg.rho_dust * cfg.cp_dust)
@@ -199,22 +214,10 @@ class LayerGrid:
             heat[:] = cfg.cp_dust
         else:
             # Dust nodes
-            K[:self.nlay_dust] = K_dust
-            cond[:self.nlay_dust] = cfg.k_dust * cfg.Et**2
-            dens[:self.nlay_dust] = cfg.rho_dust
-            heat[:self.nlay_dust] = cfg.cp_dust
-
-            # if(cfg.use_RTE and cfg.RTE_solver=='disort'):
-            #     K[self.nlay_dust] = K_rock
-            #     cond[self.nlay_dust] = cfg.k_rock * cfg.Et**2
-            #     dens[self.nlay_dust] = cfg.rho_rock
-            #     heat[self.nlay_dust] = cfg.cp_rock
-            # else:
-            # # Interface harmonic mean
-            K[self.nlay_dust] = 2/(1/K_dust + 1/K_rock)
-            cond[self.nlay_dust] = 2/(1/(cfg.k_dust*cfg.Et**2) + 1/(cfg.k_rock*cfg.Et**2))
-            dens[self.nlay_dust] = 2/(1/cfg.rho_dust + 1/cfg.rho_rock)
-            heat[self.nlay_dust] = 2/(1/cfg.cp_dust + 1/cfg.cp_rock)
+            K[:self.nlay_dust+1] = K_dust
+            cond[:self.nlay_dust+1] = cfg.k_dust * cfg.Et**2
+            dens[:self.nlay_dust+1] = cfg.rho_dust
+            heat[:self.nlay_dust+1] = cfg.cp_dust
 
             # Rock nodes
             K[self.nlay_dust+1:] = K_rock
@@ -223,11 +226,17 @@ class LayerGrid:
             heat[self.nlay_dust+1:] = cfg.cp_rock
 
         self.K = K
+        self.cond = cond
+        self.dens = dens
+        self.heat = heat
+
+        self.alpha = 2.0*cond[self.nlay_dust] / self.l_thick[self.nlay_dust]  # Thermal diffusivity at dust-rock interface
+        self.beta = 2.0*cond[self.nlay_dust+1] / self.l_thick[self.nlay_dust+1]  # Thermal diffusivity at rock-dust interface
 
         #Calculate time increment here. 
         if cfg.auto_dt:
             # Calculate dt based on stability criterion
-            dt_stability = cfg.dtfac*np.min(lthick / K)
+            dt_stability = cfg.dtfac*np.min(lthick / K / cfg.Et)
             # Adjust dt to be nearly divisible by period
             steps_per_day = np.ceil(cfg.P / dt_stability)
             #Never fewer than 200 steps per day
@@ -258,3 +267,4 @@ class LayerGrid:
 
         # Build banded matrix
         self.diag = fd1d_heat_implicit_diagonal_nonuniform_kieffer(x_num, A1, A2, A3)
+        

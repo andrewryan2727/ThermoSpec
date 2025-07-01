@@ -29,7 +29,6 @@ def solve_bvp_vis(x, Fun, u, J, A,h0,hN,T,tol=1e-8, max_iter=50):
     # A  : central difference stencil (3 elements)
     # h0 : Thickness of top layer
     # hN : Thickness of bottom layer. 
-    # Written by Andrew Ryan with help from chatgpt, May 2025
 
     import numpy as np
     import scipy.linalg as la
@@ -77,7 +76,6 @@ def solve_bvp_therm(x, Fun, u, J, A,h0,hN,D,T,single_layer = True,tol=1e-8, max_
     # h0 : Thickness of top layer
     # hN : Thickness of bottom layer. 
     # D  : Constant term for lower boundary condition. 
-    # Written by Andrew Ryan with help from chatgpt, May 2025    
     
     import numpy as np
     import scipy.linalg as la

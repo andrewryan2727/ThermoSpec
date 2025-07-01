@@ -5,7 +5,7 @@ from config import SimulationConfig
 from grid import LayerGrid
 from stencils import build_bvp_stencil, build_jacobian_vis_banded, build_jacobian_therm_banded
 from bvp_solvers import solve_bvp_vis, solve_bvp_therm
-from rte_disort import DisortRTESolver
+import scipy.integrate
 
 # -----------------------------------------------------------------------------
 # File: rte_hapke.py
@@ -69,7 +69,10 @@ class RadiativeTransfer:
                 # Use Dirichlet boundary condition for single-layer. Heat flux is balanced at bottom boundary. 
                 D = self.cfg.sigma/np.pi * T[-1]**4
             else:
-                D = self.cfg.sigma/np.pi * T[self.grid.nlay_dust]**4
+                #Upstream value for lower boundary solver is defined by thermal emission from the substrate. 
+                #D = self.cfg.sigma/np.pi * T[self.grid.nlay_dust]**4
+                T_interface = calculate_interface_T(T, self.grid.nlay_dust, self.grid.alpha, self.grid.beta)
+                D = self.cfg.sigma/np.pi * T_interface**4
             self.phi_therm_prev = solve_bvp_therm(
                 x, self._therm_fun, u0,
                 self.J_therm_ab, self.A_bvp,
@@ -77,6 +80,7 @@ class RadiativeTransfer:
                 tol=self.cfg.bvp_tol, max_iter=self.cfg.bvp_max_iter
             )
         else:
+            #This code probably doesn't work anymore but is left here for reference. 
             ode = lambda xx, C: self._therm_fun(xx, C, T)
             bc  = lambda Ca, Cb: self._therm_bc(Ca, Cb, T)
             sol = solve_bvp(ode, bc, x,
@@ -103,13 +107,28 @@ class RadiativeTransfer:
         else:
             _, d2 = self._therm_fun(self.grid.x_RTE, (phi_therm, 0.0), T[1:self.grid.nlay_dust+1])
         source_therm = np.pi * self.cfg.q * d2
+
+        if not self.cfg.single_layer:
+            #Calculate boundary fluxes. 
+            T_interface = calculate_interface_T(T, self.grid.nlay_dust, self.grid.alpha, self.grid.beta)
+            therm_up = self.cfg.sigma / np.pi * T_interface**4
+            #downstream visible at bottom boundary is equal to phi_vis*2
+            vis_down = 2.0 * self.phi_vis_prev[-1]
+            #downstream thermal at bottom boundary is therm_up + therm_down = phi_therm*2
+            therm_down = 2.0 * self.phi_therm_prev[-1] - therm_up
+            # Note that the extra factor of 2 on vis_down in the equation below was determined via direct comparison with DISORT.
+            # The equivalency of the other terms (direct beam, diffuse therm_down, and therm_up) were also verified against DISORT. 
+            boundary_flux = (self.cfg.J * np.exp(-self.grid.x_RTE[-1]/self.mu) + vis_down*2 + therm_down*np.pi - therm_up*np.pi)
         
         source = np.zeros(self.grid.x_num)
         if self.cfg.single_layer:
             source[1:-1] = source_vis + source_therm
+            source *= self.grid.K
         else:
             source[1:self.grid.nlay_dust+1] = source_vis + source_therm
-        return source * self.grid.K
+            source *= self.grid.K
+            source[self.grid.nlay_dust+1] = boundary_flux #store the boudnary flux term here. 
+        return source
 
 
     # Internal ODE functions
@@ -141,3 +160,24 @@ class RadiativeTransfer:
         top = phi_a - 0.5*dphidx_a
         bottom = phi_b - (self.cfg.sigma/np.pi)*T[self.grid.nlay_dust]**4 + self.phi_vis_prev[-1]
         return np.array([top, bottom])
+
+def planck_wn_integrated(wn_edges, T):
+    """
+    Integrate the Planck function over each wavenumber bin (edges in cm^-1).
+    Returns band-integrated radiance (W/m^2/sr per band).
+    """
+    h = 6.62607015e-34  # Planck constant (J s)
+    c = 2.99792458e8    # Speed of light (m/s)
+    k = 1.380649e-23    # Boltzmann constant (J/K)
+    def planck_wn(wn, T):
+        wn_m = wn * 100.0  # Convert from cm^-1 to m^-1
+        return (2 * h * c**2 * wn_m**3) / (np.exp(h * c * wn_m / (k * T)) - 1)
+    B_bands = np.zeros(len(wn_edges)-1)
+    for i in range(len(B_bands)):
+        # Integrate over each bin
+        B_bands[i], _ = scipy.integrate.quad(planck_wn, wn_edges[i], wn_edges[i+1], args=(T,), limit=100)
+    # Removed division by bin width to match DISORT's band-integrated output
+    return B_bands
+
+def calculate_interface_T(T,i,alpha,beta):
+    return((alpha*T[i] + beta*T[i+1])/(alpha + beta))

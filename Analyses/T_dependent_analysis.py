@@ -42,7 +42,7 @@ def build_single_layer_lookup(k_dust_values, base_config=None):
             for i in range(n_times):
                 # Use temperature profile in dust layers only
                 T_profile = T_out[1:sim.grid.nlay_dust+1, i]
-                emissT[i] = emissionT(T_profile, tau)
+                emissT[i] = emissionT(T_profile, tau,mu=np.cos(cfg.latitude))
         else:
             emissT = None
             
@@ -184,11 +184,11 @@ def emissionT(T,tau,mu=1.0):
     T_calc = T_calc/wt_calc
     return(T_calc**0.25)
 
-def analyze_two_layer_equivalence(dust_thickness_values, k_dust_values=None, lut_temps_key=None, model_temps_key=None):
-    """Analyze equivalent single-layer k_dust for different two-layer dust thicknesses.
+def analyze_heliocentric_distance(R_values, k_dust_values=None, lut_temps_key=None, model_temps_key=None):
+    """Analyze equivalent single-layer k_dust for different heliocentric distances.
     
     Args:
-        dust_thickness_values: Array of dust thicknesses to analyze
+        R_values: Array of heliocentric distances (AU) to analyze
         k_dust_values: Array of k_dust values for lookup table (optional)
         lut_temps_key: Temperature type to use from lookup table ('T_surf' or 'emissT')
         model_temps_key: Temperature type to use from two-layer model ('T_surf' or 'emissT')
@@ -197,192 +197,202 @@ def analyze_two_layer_equivalence(dust_thickness_values, k_dust_values=None, lut
         k_dust_values = np.logspace(-4, -1, 20)  # 20 values from 1e-4 to 1e-1
     
     # Set up configurations
-    two_layer_cfg = SimulationConfig()
-    single_layer_cfg = SimulationConfig()
+    target_cfg = SimulationConfig()
+    ref_cfg = SimulationConfig()
 
     # Configure RTE modes based on temperature types
     if model_temps_key == 'emissT':
-        two_layer_cfg.use_RTE = True
-        two_layer_cfg.RTE_solver = 'disort'
-        two_layer_cfg.multi_wave = False
+        target_cfg.use_RTE = True
+        target_cfg.RTE_solver = 'hapke'
+        target_cfg.multi_wave = False
     elif model_temps_key == 'T_surf':
-        two_layer_cfg.use_RTE = False
+        target_cfg.use_RTE = False
     else:
         # Default to RTE off if not specified
-        two_layer_cfg.use_RTE = False
+        target_cfg.use_RTE = False
         model_temps_key = 'T_surf'
 
     if lut_temps_key == 'emissT':
-        single_layer_cfg.use_RTE = True
-        single_layer_cfg.RTE_solver = 'disort'
-        single_layer_cfg.multi_wave = False
+        ref_cfg.use_RTE = True
+        ref_cfg.RTE_solver = 'hapke'
+        ref_cfg.multi_wave = False
     elif lut_temps_key == 'T_surf':
-        single_layer_cfg.use_RTE = False
+        ref_cfg.use_RTE = False
     else:
         # Match two-layer configuration if not specified
-        single_layer_cfg.use_RTE = two_layer_cfg.use_RTE
+        ref_cfg.use_RTE = target_cfg.use_RTE
         lut_temps_key = model_temps_key
 
-    # Two layer model configuration
-    two_layer_cfg.single_layer = False
-    two_layer_cfg.ndays = 5
-    two_layer_cfg.rock_thickness = 1.0 # m, Thickness of rock substrate. 
+    # Basic configuration
+    target_cfg.single_layer = True
+    target_cfg.ndays = 5
+    target_cfg.dust_thickness = 1.0  # m, Default thickness for single-layer model
+    target_cfg.rho_dust= 600.0
+    target_cfg.cp_dust = 700.0
+    target_cfg.k_dust = 5.5e-4
+    target_cfg.Et = 90.0 #1 mm particles, fill factor of 0.3
+    target_cfg.last_day = True
+    target_cfg.ssalb_vis = 0.06
+    target_cfg.gamma_therm = 0.95
 
-    two_layer_cfg.k_rock = 1.0
-    two_layer_cfg.rho_rock = 2000.0
-    two_layer_cfg.cp_rock = 700.0
-
-    two_layer_cfg.k_dust = 5.5e-4 #For RTE, this should be phonon conductivity only, 5.5e-4. For non_RTE, 2.5e-3
-    two_layer_cfg.rho_dust = 366.0
-    two_layer_cfg.cp_dust = 700.0
-    two_layer_cfg.k_dust_auto = False #Auto calculate dust radiative conductivity from value below. 
-
-    #Two layer Hapke and DISORT options
-    two_layer_cfg.Et = 1000.0 #
-    two_layer_cfg.ssalb_vis = 0.06 #
-    two_layer_cfg.gamma_therm = 0.90 #Not used by disort. 0.90 is approx equivalent to emissivity 0.95.
-    two_layer_cfg.R_base = 0.0 #Reflectivity of substrate. disort only. 
-    two_layer_cfg.g = 0.0 #assymetry parameter. disort only. 
-
-    #Non-hapke/disort parameters
-    two_layer_cfg.albedo = 0.02
-    two_layer_cfg.em = 0.95
+    target_cfg.latitude = np.radians(0.0)
     
-    #Reference model (single layer) options. 
-    single_layer_cfg.single_layer = True
-    single_layer_cfg.dust_thickness = 1.0  # m, Default thickness for single-layer model
-    single_layer_cfg.ndays = two_layer_cfg.ndays
-    single_layer_cfg.k_dust_auto = False  # don't auto-adjust conductivity, as this is our free parameter. 
-    single_layer_cfg.rho_dust = two_layer_cfg.rho_rock  # Use same density as two-layer model
-    single_layer_cfg.cp_dust = two_layer_cfg.cp_rock  # Use same specific heat as two-layer model
-    single_layer_cfg.albedo = 0.02
-    single_layer_cfg.em = 0.95
-
-    single_layer_cfg.minsteps = 20000 #minimum number of time steps in the day. Must be very small for 2-layer scenarios
-    two_layer_cfg.minsteps = single_layer_cfg.minsteps
-
-    # Build single-layer lookup table
-    print(f"Building single-layer lookup table (RTE={single_layer_cfg.use_RTE})...")
-    single_layer_lookup = build_single_layer_lookup(k_dust_values, single_layer_cfg)
-    single_layer_lookup['k_dust'] = np.log10(k_dust_values)
-    
-    # Get temperature data for interpolation
-    temps = []
-    for k in k_dust_values:
-        if lut_temps_key not in single_layer_lookup[k]:
-            raise ValueError(f"Temperature type '{lut_temps_key}' not available in lookup table. "
-                           f"Make sure RTE settings match requested temperature type.")
-        temps.append(single_layer_lookup[k][lut_temps_key])
-    temps = np.array(temps)
-    
-    # Process lookup table times
-    lut_times = single_layer_lookup[k_dust_values[0]]['lut_times']
-    lut_times = (lut_times - np.min(lut_times)) / (np.max(lut_times) - np.min(lut_times))
-    
-    # Create interpolators
-    lut_k_interp, lut_time_interp = interpolate_temps(single_layer_lookup, temps_key=lut_temps_key)
-
-    # Store everything needed for interpolation in the lookup dictionary
-    single_layer_lookup['lut_times'] = lut_times
-    single_layer_lookup['lut_k_interp'] = lut_k_interp
-    single_layer_lookup['lut_time_interp'] = lut_time_interp
-
-    # Pre-calculate extrema
-    nsolns = len(k_dust_values)
-    lut_max_time = np.zeros(nsolns)
-    lut_max_T = np.zeros(nsolns)
-    lut_min_T = np.zeros(nsolns)
-    idx1 = np.argmin(np.abs(lut_times-0.3))
-    idx2 = np.argmin(np.abs(lut_times-0.7))
-    
-    for i in np.arange(nsolns):
-        lut_max_time[i] = find_max_time(temps[i,idx1:idx2],lut_times[idx1:idx2])
-        lut_max_T[i] = lut_time_interp(lut_max_time[i])[i]
-        lut_interp2 = interp1d(lut_times,temps[i,:],axis=0,fill_value='extrapolate',kind='cubic')
-        result = minimize_scalar(lut_interp2,bounds=(0.0,0.3),method='bounded')
-        lut_min_T[i] = lut_interp2(result.x)
-    
-    single_layer_lookup.update({
-        'max_time': lut_max_time,
-        'max_T': lut_max_T,
-        'min_T': lut_min_T
-    })
+    ref_cfg.single_layer = True
+    ref_cfg.ndays = target_cfg.ndays
+    ref_cfg.dust_thickness = 1.0  # m, Default thickness for single-layer model
+    ref_cfg.k_dust_auto = False  # Use fixed k_dust values
+    ref_cfg.rho_dust = target_cfg.rho_dust  # Use same density as two-layer model
+    ref_cfg.cp_dust = target_cfg.cp_dust  # Use same specific heat as two-layer model
+    ref_cfg.last_day = True
+    ref_cfg.latitude = target_cfg.latitude
+    ref_cfg.albedo = 0.04
 
     results = {}
     import matplotlib.pyplot as plt
     from matplotlib.backends.backend_pdf import PdfPages
-    
+
     with PdfPages('thermal_model_fits.pdf') as pdf:
         fig = plt.figure(figsize=(15, 10))
-        for i, dust_thickness in enumerate(dust_thickness_values):
-            print(f"Processing dust thickness: {dust_thickness:.2e} m")
-            
-            # Run two-layer model
-            two_layer_cfg.dust_thickness = dust_thickness
-            two_layer_cfg.__post_init__()
-            sim = Simulator(two_layer_cfg)
+        for i, R in enumerate(R_values):
+            print(f"Processing heliocentric distance: {R:.2f} AU")
+
+
+
+            # Build reference LUT for this R (use_RTE=False)
+            ref_cfg.R = R
+            ref_cfg.__post_init__()
+            ref_cfg.use_RTE = False
+            ref_cfg.k_dust = np.max(k_dust_values)
+            #Figure out what base temperature to use by iterating the reference model
+            # using the mean surface temperature from the previous iteration as the initialization temp
+            # for the next iteration. 
+            T_bottom_guess = 275.0*R**(-1/2)
+            ref_cfg.T_bottom = T_bottom_guess
+            tolerance = 3.0  # K
+            max_iter = 10
+            for _ in range(max_iter):
+                sim_ref = Simulator(ref_cfg)
+                _, _, _, T_surf_ref, _ = sim_ref.run()
+                avg_T_surf = np.mean(T_surf_ref)
+                print(avg_T_surf)
+                if abs(avg_T_surf - ref_cfg.T_bottom) < tolerance:
+                    break
+                ref_cfg.T_bottom = avg_T_surf
+            ref_cfg.T_bottom = avg_T_surf
+            print(f"[R={R:.2f} AU] Final T_bottom used for reference LUT: {ref_cfg.T_bottom:.2f} K")
+            ref_lookup = build_single_layer_lookup(k_dust_values, ref_cfg)
+            ref_lookup['k_dust'] = np.log10(k_dust_values)
+
+
+
+            # Prepare interpolation for this R
+            temps = [ref_lookup[k][lut_temps_key] for k in k_dust_values]
+            temps = np.array(temps)
+            lut_times = ref_lookup[k_dust_values[0]]['lut_times']
+            lut_times = (lut_times - np.min(lut_times)) / (np.max(lut_times) - np.min(lut_times))
+            lut_k_interp, lut_time_interp = interpolate_temps(ref_lookup, temps_key=lut_temps_key)
+            ref_lookup['lut_times'] = lut_times
+            ref_lookup['lut_k_interp'] = lut_k_interp
+            ref_lookup['lut_time_interp'] = lut_time_interp
+
+            # Pre-calculate extrema
+            nsolns = len(k_dust_values)
+            lut_max_time = np.zeros(nsolns)
+            lut_max_T = np.zeros(nsolns)
+            lut_min_T = np.zeros(nsolns)
+            idx1 = np.argmin(np.abs(lut_times-0.3))
+            idx2 = np.argmin(np.abs(lut_times-0.7))
+            for j in np.arange(nsolns):
+                lut_max_time[j] = find_max_time(temps[j,idx1:idx2],lut_times[idx1:idx2])
+                lut_max_T[j] = lut_time_interp(lut_max_time[j])[j]
+                lut_interp2 = interp1d(lut_times,temps[j,:],axis=0,fill_value='extrapolate',kind='cubic')
+                result = minimize_scalar(lut_interp2,bounds=(0.0,0.3),method='bounded')
+                lut_min_T[j] = lut_interp2(result.x)
+            ref_lookup.update({
+                'max_time': lut_max_time,
+                'max_T': lut_max_T,
+                'min_T': lut_min_T
+            })
+
+            # Run target model (use_RTE=True)
+            target_cfg.R = R
+            target_cfg.T_bottom = ref_cfg.T_bottom
+            target_cfg.__post_init__()
+            sim = Simulator(target_cfg)
             T_out, _, phi_th, T_surf, t_out = sim.run()
-            
-            # Calculate temperatures for comparison based on requested type
+
+            # Calculate target modelT as before
             if model_temps_key == 'emissT':
-                if not two_layer_cfg.use_RTE:
+                if not target_cfg.use_RTE:
                     raise ValueError("Cannot get emission temperatures without RTE enabled")
-                tau = sim.grid.x_RTE  # Already in tau units
+                tau = sim.grid.x_RTE
                 n_times = T_out.shape[1]
                 modelT = np.zeros(n_times)
                 for j in range(n_times):
                     T_profile = T_out[1:sim.grid.nlay_dust+1, j]
-                    modelT[j] = emissionT(T_profile, tau)
-            else:  # T_surf
+                    modelT[j] = emissionT(T_profile, tau,mu=np.cos(target_cfg.latitude))
+            else:
                 modelT = T_surf.copy()
-            
+
             # Find best fit
-            best_k_dust, error, best_temps = find_best_fit_k_dust(modelT, single_layer_lookup,
-                                                                temps_key=lut_temps_key)
-            
-            results[dust_thickness] = {
+            best_k_dust, error, best_temps = find_best_fit_k_dust(modelT, ref_lookup, temps_key=lut_temps_key)
+
+            results[R] = {
                 'best_k_dust': best_k_dust,
                 'error': error,
-                'thermal_inertia': np.sqrt(best_k_dust * single_layer_cfg.rho_dust * single_layer_cfg.cp_dust),
+                'thermal_inertia': np.sqrt(best_k_dust * ref_cfg.rho_dust * ref_cfg.cp_dust),
                 'temperatures': best_temps,
                 'model_temps': modelT
             }
-            
+
             # Plot comparison
             plt.subplot(3, 4, (i % 12) + 1)
             temp_type = 'Emission' if model_temps_key == 'emissT' else 'Surface'
-            plt.plot(sim.t_out / 3600, modelT, 'b-', 
-                    label=f'Two-layer {temp_type} T')
-            plt.plot(sim.t_out / 3600, best_temps, 'r--', 
-                    label=f'Single-layer (k={best_k_dust:.2e})')
-            plt.title(f'd={dust_thickness:.2e}m\nTI={results[dust_thickness]["thermal_inertia"]:.1f}')
+            plt.plot(sim.t_out / 3600, modelT, 'b-', label=f'R={R:.1f} AU {temp_type} T')
+            plt.plot(sim.t_out / 3600, best_temps, 'r--', label=f'No RTE fit (k={best_k_dust:.2e})')
+            plt.title(f'R={R:.1f} AU\nTI={results[R]["thermal_inertia"]:.1f}')
             if i % 12 == 0:
                 plt.legend()
-            
-            if (i + 1) % 12 == 0 or i == len(dust_thickness_values) - 1:
+            if (i + 1) % 12 == 0 or i == len(R_values) - 1:
                 plt.tight_layout()
                 pdf.savefig(fig)
                 plt.close()
-                if i < len(dust_thickness_values) - 1:
+                if i < len(R_values) - 1:
                     fig = plt.figure(figsize=(15, 10))
-    
     return results
 
 if __name__ == "__main__":
-    dust_thickness_values = np.array([5.0e-6, 10.0e-6, 30.0e-6, 50.0e-6, 100.0e-6, 200.0e-6, 
-                                    500.0e-6, 0.001, 0.002, 0.005, 0.01, 0.02])
+    R_values = np.array([0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0, 4.0, 5.0])
+    #R_values = np.array([3.0, 4.0, 5.0])
     k_dust_values = np.logspace(-5, 0.5, 25)  # 25 values from 1e-5 to 1e0
     
-    results = analyze_two_layer_equivalence(dust_thickness_values, k_dust_values, 
-                                            lut_temps_key='T_surf', model_temps_key='emissT')
+    results = analyze_heliocentric_distance(R_values, k_dust_values, 
+                                          lut_temps_key='T_surf', model_temps_key='emissT')
     
     # Plot summary of results
     import matplotlib.pyplot as plt
+    R_distances = np.array(list(results.keys()))
+    thermal_inertias = np.array([results[R]['thermal_inertia'] for R in R_distances])
     plt.figure(figsize=(10, 6))
-    dust_thicknesses = list(results.keys())
-    thermal_inertias = [results[d]['thermal_inertia'] for d in dust_thicknesses]
-    plt.semilogx(dust_thicknesses, thermal_inertias, 'o-')
-    plt.xlabel('Dust Thickness (m)')
-    plt.ylabel('Equivalent Single-Layer Thermal Inertia (J/m²/K/s^0.5)')
-    plt.grid(True)
-    plt.savefig('thermal_inertia_vs_thickness.pdf')
+    plt.loglog(R_distances, thermal_inertias, 'o-', label='Model Results')
+
+    # Power-law fit: TI = A * R^alpha
+    logR = np.log(R_distances)
+    logTI = np.log(thermal_inertias)
+    coeffs = np.polyfit(logR, logTI, 1)
+    alpha = coeffs[0]
+    A = np.exp(coeffs[1])
+    TI_fit = A * R_distances**alpha
+    plt.loglog(R_distances, TI_fit, 'r--', label=f'Power-law fit ($R^{{{alpha:.2f}}}$)')
+
+    # Reference line for alpha = -0.75
+    TI_ref = thermal_inertias[0] * (R_distances / R_distances[0])**(-0.75)
+    plt.loglog(R_distances, TI_ref, 'k:', label=r'Ref: $R^{-0.75}$')
+
+    plt.xlabel('Heliocentric Distance (AU)')
+    plt.ylabel('Equivalent Thermal Inertia (J/m²/K/s$^{0.5}$)')
+    plt.title(f'Equivalent Thermal Inertia vs Heliocentric Distance\nPower-law exponent $\\alpha$ = {alpha:.2f}')
+    plt.legend()
+    plt.grid(True, which='both', ls='--')
+    plt.tight_layout()
+    plt.savefig('thermal_inertia_vs_distance.pdf')

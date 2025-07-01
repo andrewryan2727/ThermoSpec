@@ -141,6 +141,15 @@ class Simulator:
 		solves diag * U_new = U_old + dt * source_term.
 		"""
 		b = self.T + self.grid.dt * self.source_term
+		if(not self.cfg.single_layer and self.cfg.use_RTE):
+			#the boundary flux value is stored in the source_term array in position nlay_dust+1
+			i = self.grid.nlay_dust
+			b[i+1] -= self.grid.dt * self.source_term[i+1] #clear the source term for the interface node, which is not a real node in the grid.
+			dz_rho_cp_i   = self.grid.l_thick[i] * self.grid.dens[i] * self.grid.heat[i]/self.cfg.Et
+			dz_rho_cp_ip1 = self.grid.l_thick[i+1] * self.grid.dens[i+1] * self.grid.heat[i+1]/self.cfg.Et
+			#Choose one of the two following options, modifying b[i] or b[i+1]. Unclear if one is better than the other.
+			#b[i] += self.grid.dt * self.source_term[i+1] / dz_rho_cp_i
+			b[i+1] += self.grid.dt * self.source_term[i+1] / dz_rho_cp_ip1
 		# Solve banded system
 		U_new = solve_banded((1, 1), self.grid.diag, b)
 		self.T = U_new
@@ -235,10 +244,10 @@ class Simulator:
 				self.T_surf_out = T_surf_hist[-len(self.t_out):]
 				self.mu_out = self.mu_array[-len(self.t_out):]
 
-		# Always run DISORT radiance computation if needed
+		
 		if(self.cfg.use_RTE and self.cfg.RTE_solver=='disort'):
-			#Reinitialize disort to create radiance outputs. 
-			#This will trigger the loading of new optical constants files, which optionally can 
+			#Reinitialize disort to get observer radiance values at output times. 
+			#This will trigger the loading of new optical constants files for multi-wave, which optionally can 
 			# be at a higher spectral resolution. 
 			self.rte_disort = DisortRTESolver(self.cfg, self.grid,output_radiance=True)
 			if(self.cfg.multi_wave):
@@ -262,10 +271,13 @@ class Simulator:
 					self.radiance_out[:,idx] = rad.numpy()
 				else:
 					self.radiance_out[idx] = rad.numpy()
-				#TO DO: Figure out why radiance only varies a tiny bit....
-				self.rad_T_out[idx], _, _, _ = fit_blackbody_wn_banded(self,wn_bounds, rad.numpy(),idx=idx)
-			#Do this again to compute a smooth radiance spectrum for emissivity spectrum calculations. 
-			sim.disort_emissivity()
+				if(self.cfg.multi_wave):
+					self.rad_T_out[idx], _, _, _ = fit_blackbody_wn_banded(self,wn_bounds, rad.numpy(),idx=idx)
+				else:
+					self.rad_T_out[idx] = fit_blackbody_broadband(self,rad.numpy(),idx=idx)
+			if self.cfg.multi_wave:
+				#Run disort again with spectral features removed to produce a smooth radiance spectrum for emissivity division. 
+				self.disort_emissivity()
 
 
 	def run(self):
@@ -344,6 +356,7 @@ class Simulator:
 			# Optional progress updates
 			if self.cfg.diurnal and j % max(100, self.t_num//20) == 0:
 				print(f"Time step {j}/{self.t_num}")
+				
 
 		# Interpolate results to desired output times
 		self._make_outputs()
@@ -354,6 +367,8 @@ class Simulator:
 		return self.T_out, self.phi_vis_out, self.phi_therm_out, self.T_surf_out, self.t_out
 	
 	def disort_emissivity(self):
+		#Runs disort with uniform_props flag, which averages out all spectral properties (extinction and scattering properties)
+		# for the purpose of producing an equivalent but spectrally smooth radiance spectrum for the emissivity division. 
 		rte_disort = DisortRTESolver(self.cfg, self.grid,output_radiance=True, uniform_props = True)
 		if(self.cfg.multi_wave):
 			nwave = len(rte_disort.wavenumbers)
@@ -419,14 +434,28 @@ def fit_blackbody_wn_banded(sim,wn_edges, radiance,idx=-1):
 		mask = (radiance > 0) & (B > 0)
 		return np.sum((np.log(radiance[mask]) - np.log(B[mask]))**2)
 	T0 = sim.T_out[1,idx]
-	minbound = sim.T_out[:,idx].min()
-	maxbound = sim.T_out[:,idx].max()
+	minbound = sim.T_out[:,idx].min()-5
+	maxbound = sim.T_out[:,idx].max()+5
 	res = scipy.optimize.minimize(loss, [T0], bounds=[(minbound, maxbound)],)
 	T_fit = res.x[0]
 	B_fit = planck_wn_integrated(wn_edges, T_fit)
 	return T_fit, B_fit, radiance/B_fit, sim.rte_disort.wavenumbers[:idx]
 
-
+def fit_blackbody_broadband(sim,radiance,idx=-1):
+	"""
+	Fit a blackbody spectrum to the given broadband radiance.
+	radiance: array of band-integrated radiances (same length as sim.rte_disort.wavenumbers)
+	Returns best-fit temperature and the fitted blackbody spectrum.
+	"""
+	def loss(T):
+		B = sim.cfg.sigma*(T[0])**4.0
+		return np.sum((np.log(radiance*np.pi) - np.log(B))**2)
+	T0 = sim.T_out[1,idx]
+	minbound = sim.T_out[:, idx].min()-5
+	maxbound = sim.T_out[:, idx].max()+5
+	res = scipy.optimize.minimize(loss, [T0], bounds=[(minbound, maxbound)],)
+	T_fit = res.x[0]
+	return T_fit
 
 if __name__ == "__main__":
 	sim = Simulator()
