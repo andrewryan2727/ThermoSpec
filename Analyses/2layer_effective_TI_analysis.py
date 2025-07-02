@@ -42,7 +42,7 @@ def build_single_layer_lookup(k_dust_values, base_config=None):
             for i in range(n_times):
                 # Use temperature profile in dust layers only
                 T_profile = T_out[1:sim.grid.nlay_dust+1, i]
-                emissT[i] = emissionT(T_profile, tau)
+                emissT[i] = emissionT(T_profile, sim.grid.x_boundaries,0)
         else:
             emissT = None
             
@@ -171,18 +171,16 @@ def find_best_fit_k_dust(modelT, single_layer_lookup, temps_key='T_surf', start_
     
     return best_k_dust, rmserr_many_time_scalar(result.x,modelT,lut_times, lut_times, single_layer_lookup), best_temps
 
-def emissionT(T,tau,mu=1.0):
-    # Calculate effective emission temperature from radiative flux.
-    # T is the temperature profile
-    # tau is the optical depth profile (already in tau units)
-    # mu is the cosine of the emission angle (observer)
-    T_calc = 0.0
-    wt_calc = 0.0
-    for i in np.arange(len(T)):
-        T_calc += (T[i]**4.0)*np.exp(-tau[i]/mu)
-        wt_calc += np.exp(-tau[i]/mu)
-    T_calc = T_calc/wt_calc
-    return(T_calc**0.25)
+def emissionT(T,tau_edges,T_interface,mu=1.0):
+	T_calc = 0.0
+	wt_calc = 0.0
+	for i in np.arange(len(T)):
+		T_calc += (T[i]**4.0)*(np.exp(-tau_edges[i]/mu) - np.exp(-tau_edges[i+1]))
+	T_calc += T_interface**4. * np.exp(-tau_edges[-1]/mu)
+	return(T_calc**0.25)
+
+def calculate_interface_T(T,i,alpha,beta):
+    return((alpha*T[i] + beta*T[i+1])/(alpha + beta))
 
 def analyze_two_layer_equivalence(dust_thickness_values, k_dust_values=None, lut_temps_key=None, model_temps_key=None):
     """Analyze equivalent single-layer k_dust for different two-layer dust thicknesses.
@@ -238,10 +236,10 @@ def analyze_two_layer_equivalence(dust_thickness_values, k_dust_values=None, lut
     two_layer_cfg.k_dust_auto = False #Auto calculate dust radiative conductivity from value below. 
 
     #Two layer Hapke and DISORT options
-    two_layer_cfg.Et = 1000.0 #
+    two_layer_cfg.Et = 5000.0 #
     two_layer_cfg.ssalb_vis = 0.06 #
     two_layer_cfg.gamma_therm = 0.90 #Not used by disort. 0.90 is approx equivalent to emissivity 0.95.
-    two_layer_cfg.R_base = 0.0 #Reflectivity of substrate. disort only. 
+    two_layer_cfg.R_base = 0.05 #Reflectivity of substrate. disort only. 
     two_layer_cfg.g = 0.0 #assymetry parameter. disort only. 
 
     #Non-hapke/disort parameters
@@ -332,7 +330,8 @@ def analyze_two_layer_equivalence(dust_thickness_values, k_dust_values=None, lut
                 modelT = np.zeros(n_times)
                 for j in range(n_times):
                     T_profile = T_out[1:sim.grid.nlay_dust+1, j]
-                    modelT[j] = emissionT(T_profile, tau)
+                    T_interface = calculate_interface_T(T_out[:,j], sim.grid.nlay_dust, sim.grid.alpha, sim.grid.beta)
+                    modelT[j] = emissionT(T_profile,sim.grid.x_boundaries,T_interface)
             else:  # T_surf
                 modelT = T_surf.copy()
             
@@ -386,3 +385,6 @@ if __name__ == "__main__":
     plt.ylabel('Equivalent Single-Layer Thermal Inertia (J/m²/K/s^0.5)')
     plt.grid(True)
     plt.savefig('thermal_inertia_vs_thickness.pdf')
+    # Write dust_thickness and thermal_inertias to a two-column ASCII file
+    np.savetxt('thermal_inertia_vs_thickness.txt',
+           np.column_stack([dust_thicknesses, thermal_inertias]))

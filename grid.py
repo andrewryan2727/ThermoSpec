@@ -138,14 +138,10 @@ class LayerGrid:
         self.x_RTE = x[1:-1].copy() if cfg.single_layer else x[1:self.nlay_dust+1].copy()
         self.x_orig = x.copy()
         self.x_num = x_num
-        self.dtau = np.insert(np.diff(self.x_RTE),0,self.x_RTE[0]*2) #Array of thickness values of computational layers, for disort. Assumed uniform thickness.  
-        #Calculate coordinates at the edge of each computational layer, for disort. 
-        x_boundaries = np.zeros(len(self.dtau)+1)
-        for i in np.arange(len(self.dtau)):
-            if(i!=0):
-                x_boundaries[i] = x_boundaries[i-1] + self.dtau[i-1]
-        x_boundaries[-1] = x_boundaries[-2] + self.dtau[-1]
-        self.x_boundaries = x_boundaries
+        #self.dtau = np.insert(np.diff(self.x_RTE),0,self.x_RTE[0]*2) #Array of thickness values of computational layers, for disort. Assumed uniform thickness.  
+        self.dtau = self.l_thick[1:self.nlay_dust+1]
+        #Calculate coordinates at the edge of each RTE computational layers, for disort. 
+        self.x_boundaries = np.insert(np.cumsum(self.l_thick[1:self.nlay_dust+1]),0,0) #in tau units. 
 
     def _calculate_lthick(self):
         """

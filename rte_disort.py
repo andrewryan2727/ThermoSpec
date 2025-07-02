@@ -122,9 +122,8 @@ class DisortRTESolver:
                     Et = n_p * self.Cext_array[i_wave]*1e-12 #extinction coefficient at this wavelength, converting Cext from µm^2 to m^2 in the process. 
                     if(self.uniform_props):
                         Et = n_p * np.mean(self.Cext_array[self.wn_min:self.wn_max])*1e-12
-                    #Et = Et*0.0 + 2000.0 #manual override to fixed value for testing 
-                    tau = node_depth_meters*Et #tau in center of each layer.
-                    tau_boundaries = Et*self.grid.x_boundaries/self.cfg.Et #tau at boundaries of each layer 
+                    #Et = Et*0.0 + 100.0 #manual override to fixed value for testing 
+                    tau_boundaries = Et*self.grid.x_boundaries/self.cfg.Et #tau at boundaries of each layer, convert from global Et to wavelength-specific Et.  
                     #dtau = np.insert(np.diff(tau),0,tau[0]*2)
                     dtau = tau_boundaries[1:] - tau_boundaries[:-1] #tau at boundaries of each layer
                     tau_layer = torch.tensor(dtau,dtype=torch.float64)
@@ -134,7 +133,7 @@ class DisortRTESolver:
                         ssalb_val = self.cfg.disort_ssalb_vis
                     if(self.uniform_props):
                         ssalb_val = np.mean(self.ssalb_array[self.wn_min:self.wn_max])
-                    #ssalb_val = ssalb_val*0.0 + 0.8 #manual override to fixed value for testing. 
+                    #ssalb_val = ssalb_val*0.0 + 0.1 #manual override to fixed value for testing. 
                     ssa_layer = torch.full([n_layers], ssalb_val,dtype=torch.float64)
                     g_val = self.g_array[i_wave]
                     #g_val = g_val*0.0 #manual override to fixed value for testing. 

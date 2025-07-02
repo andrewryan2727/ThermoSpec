@@ -17,7 +17,7 @@ class SimulationConfig:
     # Radiative properties
     ssalb_vis: float = 0.1          # single-scattering visible albedo
     gamma_therm: float = 1.0         # thermal albedo factor
-    Et: float = 2000.0               # thermal extinction coefficient (m^-1)
+    Et: float = 1000.0               # thermal extinction coefficient (m^-1)
     eta: float = 1.0                 # visible/thermal extinction ratio 
     em: float = 0.90                 # thermal emissivity, ONLY USED FOR NON-RTE MODELS
     albedo: float = 0.0178              # surface albedo, ONLY USED FOR NON-RTE MODELS
@@ -40,11 +40,11 @@ class SimulationConfig:
     cp_rock: float = 700.0           # rock heat capacity (J/kg/K)
 
     # Boundary & layer settings
-    T_bottom: float = 265.           # bottom boundary temperature (when Dirichlet) and global initialization temperature (K)
-    dust_thickness: float = 100.5e-6  # dust column total thickness (m)
+    T_bottom: float = 270.           # bottom boundary temperature (when Dirichlet) and global initialization temperature (K)
+    dust_thickness: float = 100.0e-6  # dust column total thickness (m)
     rock_thickness: float = 0.50     # rock substrate column total thickness (m)
     auto_thickness: bool = True      # auto-calculate dust and rock layer thicknesses based on thermal skin depth
-    flay: float = 0.10               # First layer thickness (fraction of skin depth) if using auto thickness.
+    flay: float = 0.15               # First layer thickness (fraction of skin depth) if using auto thickness.
     geometric_spacing: bool = True   # Node spacing increases by factor spacing_factor, otherwise constant thickness. Only applies to single layer scenario. 
     spacing_factor: float = 1.05     # layer thickness increase factor for geometric spacing. Only applies to single layer scenario!
 
@@ -70,10 +70,10 @@ class SimulationConfig:
 
 
     # Advanced times stepping and numerical accuracy prameters
-    dtfac: float = 10.0               # Define time step as dt = dtfac*min(dx/K). Higher number increases speed at risk of reduced accuracy. Default=10
-    minsteps: int = 5000            # Minimum number of time steps per day. Used if auto_dt is True. Default=2000
+    dtfac: float = 50.0               # Define time step as dt = dtfac*min(dx/K). Higher number increases speed at risk of reduced accuracy. Default=10
+    minsteps: int = 10000            # Minimum number of time steps per day. Used if auto_dt is True. Default=2500. Try setting to a higher number if you think your model is inaccurate.  
     min_nlay_dust: int = 12         # Minimum number of grid points within dust column for two-layer scenario. Default=12. 
-    rock_lthick_fac: float = 0.1    # Factor by which to multiply auto-calculated rock layer thickness. This is used to ensure that the rock layer is not too thick compared to the dust layer. Default=0.25. 
+    rock_lthick_fac: float = 0.2    # Factor by which to multiply auto-calculated rock layer thickness. This is used to ensure that the rock layer is not too thick compared to the dust layer. Default=0.25. 
     dust_rte_max_lthick: float = 0.05  # Maximum first grid layer thickness for RTE model (in tau units, i.e., optical opacity). Default=0.025
 
     custom_bvp: bool = True          # use the custom written bvp solver for the hapke RTE. Otherwise, reverts to scipy.solve_bvp (which may not actually work anymore)
@@ -94,19 +94,19 @@ class SimulationConfig:
     multi_wave: bool = True  # Use multiple wavelengths, using wavelength-dependent optical properties from file (extinction coefficient, ssalb, scattering matrix moments)
     T_fixed: bool = False    # Use initialization temperature to calculate radiance and emissivity spectra. No thermal evolution. Only valid if diurnal=False. 
     #folder: str = "/Users/ryan/Research/RT_models/RT_thermal_model/optical_constants/Quartz_5micron_30wns/pack_frac_0.35/output" #path to scattering table files
-    mie_file: str = "/Users/ryan/Research/RT_models/RT_thermal_model/Preprocessing/serp85_mag5_dol5_graph5_5um_32.txt"   #Table of values from Mie code.  
+    mie_file: str = "/Users/ryan/Research/RT_models/RT_thermal_model/Preprocessing/serp85_mag5_dol5_graph5_10um_32.txt"   #Table of values from Mie code.  
     solar_spectrum_file: str = '/Users/ryan/Research/RT_models/RT_thermal_model/Preprocessing/solar_integrated_32.txt'  #integrates solar spectrum. Must have same spectral sampling as scattering matrix. 
-    substrate_spectrum: str = '/Users/ryan/Research/RT_models/RT_thermal_model/Preprocessing/Bennu_hummocky_32wns.txt' #Bennu emissivity spectrum for substrate
+    substrate_spectrum: str = '/Users/ryan/Research/RT_models/RT_thermal_model/Preprocessing/Orgueil_P11442_VEH_32wns.txt' #Bennu emissivity spectrum for substrate
     wn_bounds: str = '/Users/ryan/Research/RT_models/RT_thermal_model/Preprocessing/wn_bounds_32.txt' #Wavenumber bounds for input files.
-    use_spec: bool = False     #Use emissivity spectrum for substrate. If false, uses global reflectivity value R_base
+    use_spec: bool = True     #Use emissivity spectrum for substrate. If false, uses global reflectivity value R_base
     R_base: float = 0.0       # Substrate reflectivity for 2-layer model. Used if multi_wave=False and/or use_spec=False. 
-    fill_frac: float = 0.2   #Fill fraction for particles. 
-    radius: float = 5.0e-6    #Particle radius in meters. 
+    fill_frac: float = 0.15   #Fill fraction for particles. 
+    radius: float = 10.0e-6    #Particle radius in meters. 
     
     #Output settings. Choose files with desired multiwave spectral sampling for calculating radiance output. 
-    mie_file_out: str = "/Users/ryan/Research/RT_models/RT_thermal_model/Preprocessing/serp85_mag5_dol5_graph5_5um.txt"    
+    mie_file_out: str = "/Users/ryan/Research/RT_models/RT_thermal_model/Preprocessing/serp85_mag5_dol5_graph5_10um_216.txt"    
     solar_spectrum_file_out: str = '/Users/ryan/Research/RT_models/RT_thermal_model/Preprocessing/solar_integrated_216.txt'  #integrates solar spectrum. Must have same spectral sampling as scattering matrix. 
-    substrate_spectrum_out: str = '/Users/ryan/Research/RT_models/RT_thermal_model/Preprocessing/Bennu_hummocky_216wns.txt' #Bennu emissivity spectrum for substrate
+    substrate_spectrum_out: str = '/Users/ryan/Research/RT_models/RT_thermal_model/Preprocessing/Orgueil_P11442_VEH_216wns.txt' #Bennu emissivity spectrum for substrate
     otesT1_out: str = '/Users/ryan/Research/RT_models/RT_thermal_model/Preprocessing/Bennu_Type1_216wns.txt' #Output file for OTES T2 radiance outputs.
     otesT2_out: str = '/Users/ryan/Research/RT_models/RT_thermal_model/Preprocessing/Bennu_Type2_216wns.txt' #Output file for OTES T2 radiance outputs.
     wn_bounds_out: str = '/Users/ryan/Research/RT_models/RT_thermal_model/Preprocessing/wn_bounds_216.txt' #Wavenumber bounds for output files.
@@ -114,11 +114,12 @@ class SimulationConfig:
     nmom_out: int = 16        #Number of scattering moments for radiance outputs. Must be ≥ nstr_out
 
     #DISORT optical properties for visible portion of the spectrum
-    force_vis_disort: bool = False  # Force visible optical properties to be used for visible portion of the spectrum. If False, uses optical propereties loaded from files above. 
+    force_vis_disort: bool = True  # Force visible optical properties to be used for visible portion of the spectrum. If False, uses optical propereties loaded from files above. 
     disort_ssalb_vis: float = 0.060  # Single-scattering albedo for visible portion of the spectrum. Only used if force_vis=True.Bennu 0.060
     disort_g_vis: float = -0.25  # Scattering assymetry parameter for visible portion of the spectrum. Only used if force_vis=True. Bennu -0.25
 
-    #DISORT depth-dependent options. NOT YET IMPLEMENTED. 
+    #DISORT depth-dependent options. 
+    # NOT YET IMPLEMENTED. 
     depth_dependent: bool = False #Depth-dependent optical properties from file (extinction coefficient, ssalb, scattering matrix moments)
 
 
@@ -144,7 +145,7 @@ class SimulationConfig:
             #Add the estimation for the radiative term from Hapke's book, equation 16.31. 
             self.k_dust += (4.0/self.Et)*self.sigma*self.T_bottom**3.
             print(f"Using auto-calculated dust thermal conductivity: {self.k_dust:.2e} W/m/K")
-        # Rock skin depth (m)
+        # Rock skin depth (in tau units)
         self.rock_skin_depth = np.sqrt(
             self.k_rock * self.Et**2. * self.P / (self.rho_rock * self.cp_rock * np.pi)
         )
@@ -153,6 +154,7 @@ class SimulationConfig:
             k_dust_approx = self.k_dust + (4.0/self.Et)*self.sigma*self.T_bottom**3.
         else:
             k_dust_approx = self.k_dust
+        #Dust (or top) layer skin depth in tau units. 
         self.dust_skin_depth = np.sqrt(
             k_dust_approx * self.Et**2. * self.P / (self.rho_dust * self.cp_dust * np.pi)
         )

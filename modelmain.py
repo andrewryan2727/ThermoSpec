@@ -288,7 +288,7 @@ class Simulator:
 		check_convergence = not self.cfg.diurnal
 		n_check = getattr(self.cfg, 'steady_n_check', 200)  # How often to check
 		window = getattr(self.cfg, 'steady_window', 100)     # How far back to look for temperature history polynomial fit. 
-		tol = getattr(self.cfg, 'steady_tol', 0.02)         # Convergence threshold (K to extremum)
+		tol = getattr(self.cfg, 'steady_tol', 0.2)         # Convergence threshold (K to extremum)
 		converged = False
 
 		for j in range(self.t_num):
@@ -391,13 +391,12 @@ class Simulator:
 			else:
 				self.radiance_out_uniform[idx] = rad
 
-def emissionT(T,tau,mu):
+def emissionT(T,tau_edges,T_interface,mu):
 	T_calc = 0.0
 	wt_calc = 0.0
 	for i in np.arange(len(T)):
-		T_calc += (T[i]**4.0)*np.exp(-tau[i]/mu)
-		wt_calc += np.exp(-tau[i]/mu)
-	T_calc = T_calc/wt_calc
+		T_calc += (T[i]**4.0)*(np.exp(-tau_edges[i]/mu) - np.exp(-tau_edges[i+1]))
+	T_calc += T_interface**4. * np.exp(-tau_edges[-1]/mu)
 	return(T_calc**0.25)
 
 def planck_wn_integrated(wn_edges, T):
@@ -449,13 +448,16 @@ def fit_blackbody_broadband(sim,radiance,idx=-1):
 	"""
 	def loss(T):
 		B = sim.cfg.sigma*(T[0])**4.0
-		return np.sum((np.log(radiance*np.pi) - np.log(B))**2)
+		return np.sum((radiance*np.pi - B)**2)
 	T0 = sim.T_out[1,idx]
 	minbound = sim.T_out[:, idx].min()-5
 	maxbound = sim.T_out[:, idx].max()+5
 	res = scipy.optimize.minimize(loss, [T0], bounds=[(minbound, maxbound)],)
 	T_fit = res.x[0]
 	return T_fit
+
+def calculate_interface_T(T,i,alpha,beta):
+    return((alpha*T[i] + beta*T[i+1])/(alpha + beta))
 
 if __name__ == "__main__":
 	sim = Simulator()
@@ -470,8 +472,11 @@ if __name__ == "__main__":
 			plt.plot(sim.t_out / 3600, T_out[1,:], label='Surface Temperature')
 			#emissT = emissionT(T_out[1:sim.grid.nlay_dust+1,:],sim.grid.x[1:sim.grid.nlay_dust+1],1.0)
 			emissT = np.zeros(len(sim.t_out))
+			T_interface = 0.0
 			for j in np.arange(len(sim.t_out)):
-				emissT[j] = emissionT(T_out[1:sim.grid.nlay_dust+1,j],sim.grid.x[1:sim.grid.nlay_dust+1],1.0)
+				if not sim.cfg.single_layer:
+					T_interface = calculate_interface_T(T_out[:,j], sim.grid.nlay_dust, sim.grid.alpha, sim.grid.beta)
+				emissT[j] = emissionT(T_out[1:sim.grid.nlay_dust+1,j],sim.grid.x_boundaries[:sim.grid.nlay_dust+1],T_interface,1.0)
 			plt.plot(sim.t_out / 3600, emissT, label='Emission Temperature')
 			if(sim.cfg.RTE_solver == 'disort'):
 				plt.plot(sim.t_out / 3600, sim.rad_T_out, label='Radiance Fit Temperature')
@@ -575,13 +580,14 @@ if __name__ == "__main__":
 		otes_cf_emis = otesT1[idx1:idx2,1].max()
 		bbfit_cf_emis = emiss_spec[idx1:idx2].max()
 		ds_cf_emis = (final_rad/sim.radiance_out_uniform[:, -1])[idx1:idx2].max()
+		samp_cf_emis = otes_samp[idx1:idx2,1].max()
 		plt.figure()
 		#plt.plot(wn_BB, emiss_spec + otes_cf_emis - bbfit_cf_emis, label=f'Emissivity (T_fit={T_fit:.1f} K)')
 		#plt.plot(multi_wn_BB, multi_emiss_spec, label=f'Mixture Emissivity (T_fit={multi_T_fit})')
 		plt.plot(wn[:ir_cutoff], (final_rad/sim.radiance_out_uniform[:, -1])[:ir_cutoff]+otes_cf_emis - ds_cf_emis, label='DISORT emissivity',linewidth=3)
-		plt.plot(wn[:ir_cutoff], otes_samp[:ir_cutoff,1], label='OTES sample hummocky',linewidth=1)
-		plt.plot(wn[:ir_cutoff], otesT1[:ir_cutoff,1], label='OTES T1 (more dust)')
-		plt.plot(wn[:ir_cutoff], otesT2[:ir_cutoff,1], label='OTES T2 (less dust)')
+		plt.plot(wn[:ir_cutoff], otes_samp[:ir_cutoff,1]+otes_cf_emis - samp_cf_emis, label='Substrate spectrum (Orgueil)',linewidth=1)
+		plt.plot(wn[:ir_cutoff], otesT1[:ir_cutoff,1], label='OTES T1 (fewer fines)')
+		plt.plot(wn[:ir_cutoff], otesT2[:ir_cutoff,1], label='OTES T2 (more fines)')
 		plt.xlabel('Wavenumber [cm$^{-1}$]')
 		plt.ylabel('Emissivity')
 		plt.title('Final Emissivity Spectrum (Radiance / Best-fit Blackbody, band-integrated)')

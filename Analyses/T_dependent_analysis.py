@@ -42,7 +42,7 @@ def build_single_layer_lookup(k_dust_values, base_config=None):
             for i in range(n_times):
                 # Use temperature profile in dust layers only
                 T_profile = T_out[1:sim.grid.nlay_dust+1, i]
-                emissT[i] = emissionT(T_profile, tau,mu=np.cos(cfg.latitude))
+                emissT[i] = emissionT(T_profile, sim.grid.x_boundaries,0,mu=np.cos(cfg.latitude))
         else:
             emissT = None
             
@@ -171,18 +171,13 @@ def find_best_fit_k_dust(modelT, single_layer_lookup, temps_key='T_surf', start_
     
     return best_k_dust, rmserr_many_time_scalar(result.x,modelT,lut_times, lut_times, single_layer_lookup), best_temps
 
-def emissionT(T,tau,mu=1.0):
-    # Calculate effective emission temperature from radiative flux.
-    # T is the temperature profile
-    # tau is the optical depth profile (already in tau units)
-    # mu is the cosine of the emission angle (observer)
-    T_calc = 0.0
-    wt_calc = 0.0
-    for i in np.arange(len(T)):
-        T_calc += (T[i]**4.0)*np.exp(-tau[i]/mu)
-        wt_calc += np.exp(-tau[i]/mu)
-    T_calc = T_calc/wt_calc
-    return(T_calc**0.25)
+def emissionT(T,tau_edges,T_interface,mu=1.0):
+	T_calc = 0.0
+	wt_calc = 0.0
+	for i in np.arange(len(T)):
+		T_calc += (T[i]**4.0)*(np.exp(-tau_edges[i]/mu) - np.exp(-tau_edges[i+1]))
+	T_calc += T_interface**4. * np.exp(-tau_edges[-1]/mu)
+	return(T_calc**0.25)
 
 def analyze_heliocentric_distance(R_values, k_dust_values=None, lut_temps_key=None, model_temps_key=None):
     """Analyze equivalent single-layer k_dust for different heliocentric distances.
@@ -260,14 +255,15 @@ def analyze_heliocentric_distance(R_values, k_dust_values=None, lut_temps_key=No
 
             # Build reference LUT for this R (use_RTE=False)
             ref_cfg.R = R
-            ref_cfg.__post_init__()
             ref_cfg.use_RTE = False
             ref_cfg.k_dust = np.max(k_dust_values)
+            ref_cfg.ndays = 2
             #Figure out what base temperature to use by iterating the reference model
             # using the mean surface temperature from the previous iteration as the initialization temp
             # for the next iteration. 
             T_bottom_guess = 275.0*R**(-1/2)
             ref_cfg.T_bottom = T_bottom_guess
+            ref_cfg.__post_init__()
             tolerance = 3.0  # K
             max_iter = 10
             for _ in range(max_iter):
@@ -330,7 +326,7 @@ def analyze_heliocentric_distance(R_values, k_dust_values=None, lut_temps_key=No
                 modelT = np.zeros(n_times)
                 for j in range(n_times):
                     T_profile = T_out[1:sim.grid.nlay_dust+1, j]
-                    modelT[j] = emissionT(T_profile, tau,mu=np.cos(target_cfg.latitude))
+                    modelT[j] = emissionT(T_profile, sim.grid.x_boundaries,0,mu=np.cos(target_cfg.latitude))
             else:
                 modelT = T_surf.copy()
 

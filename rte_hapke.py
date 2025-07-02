@@ -70,9 +70,9 @@ class RadiativeTransfer:
                 D = self.cfg.sigma/np.pi * T[-1]**4
             else:
                 #Upstream value for lower boundary solver is defined by thermal emission from the substrate. 
-                #D = self.cfg.sigma/np.pi * T[self.grid.nlay_dust]**4
-                T_interface = calculate_interface_T(T, self.grid.nlay_dust, self.grid.alpha, self.grid.beta)
-                D = self.cfg.sigma/np.pi * T_interface**4
+                D = self.cfg.sigma/np.pi * T[self.grid.nlay_dust]**4
+                #T_interface = calculate_interface_T(T, self.grid.nlay_dust, self.grid.alpha, self.grid.beta)
+                #D = self.cfg.sigma/np.pi * T_interface**4
             self.phi_therm_prev = solve_bvp_therm(
                 x, self._therm_fun, u0,
                 self.J_therm_ab, self.A_bvp,
@@ -110,15 +110,21 @@ class RadiativeTransfer:
 
         if not self.cfg.single_layer:
             #Calculate boundary fluxes. 
-            T_interface = calculate_interface_T(T, self.grid.nlay_dust, self.grid.alpha, self.grid.beta)
-            therm_up = self.cfg.sigma / np.pi * T_interface**4
+            #T_interface = calculate_interface_T(T, self.grid.nlay_dust, self.grid.alpha, self.grid.beta)
+            #therm_up = self.cfg.sigma / np.pi * T_interface**4
+            therm_up = self.cfg.sigma/np.pi * T[self.grid.nlay_dust]**4
             #downstream visible at bottom boundary is equal to phi_vis*2
             vis_down = 2.0 * self.phi_vis_prev[-1]
             #downstream thermal at bottom boundary is therm_up + therm_down = phi_therm*2
             therm_down = 2.0 * self.phi_therm_prev[-1] - therm_up
             # Note that the extra factor of 2 on vis_down in the equation below was determined via direct comparison with DISORT.
             # The equivalency of the other terms (direct beam, diffuse therm_down, and therm_up) were also verified against DISORT. 
-            boundary_flux = (self.cfg.J * np.exp(-self.grid.x_RTE[-1]/self.mu) + vis_down*2 + therm_down*np.pi - therm_up*np.pi)
+            boundary_flux = ( therm_down*np.pi - therm_up*np.pi)
+            if F > 0:
+                boundary_flux += self.F*self.cfg.J * np.exp(-self.grid.x_RTE[-1]/self.mu) + vis_down*2
+            if(np.isnan(boundary_flux)):
+                print('hi')
+
         
         source = np.zeros(self.grid.x_num)
         if self.cfg.single_layer:
@@ -127,7 +133,7 @@ class RadiativeTransfer:
         else:
             source[1:self.grid.nlay_dust+1] = source_vis + source_therm
             source *= self.grid.K
-            source[self.grid.nlay_dust+1] = boundary_flux #store the boudnary flux term here. 
+            source[self.grid.nlay_dust+1] = boundary_flux #store the boundary flux term here. 
         return source
 
 
