@@ -37,6 +37,16 @@ class Simulator:
 			self.rte_disort = DisortRTESolver(self.cfg, self.grid)
 		# Precompute time arrays and insolation flags
 		self._setup_time_arrays()
+		#Initialize crater geometry files for roughness model
+		if self.cfg.crater:
+			from crater import CraterMesh, SelfHeatingList, ShadowTester, RadiativeTransfer as CraterRadiativeTransfer
+			# File paths can be set in config or hardcoded for now
+			self.crater_mesh = CraterMesh('new_crater2.txt')
+			self.crater_selfheating = SelfHeatingList('new_crater2_selfheating_list.txt')
+			self.crater_shadowtester = ShadowTester(self.crater_mesh)
+			self.crater_radtrans = CraterRadiativeTransfer(
+				self.crater_mesh, self.crater_selfheating,
+				albedo=self.cfg.albedo, emissivity=self.cfg.em, solar_constant=self.cfg.J)
 		# Initialize state variables and output arrays
 		self._init_state()
 
@@ -68,14 +78,15 @@ class Simulator:
 		self.t_out = np.linspace(out_start, out_end, 
 								points_per_day * (1 if self.cfg.last_day else self.cfg.ndays))
 		
-		# Solar angles for integration timesteps
-		hour_angle = (np.pi / (P / 2)) * (self.t - (P / 2))
-		mu = np.cos(self.cfg.latitude) * np.cos(hour_angle)
-		sun_up = mu > 0.001
-		F = sun_up.astype(float)
 		
-		# Handle non-diurnal cases
-		if not self.cfg.diurnal:
+				# Handle non-diurnal cases
+		if self.cfg.diurnal:
+			# Solar angles for integration timesteps
+			hour_angle = (np.pi / (P / 2)) * (self.t - (P / 2))
+			mu = np.sin(self.cfg.dec)*np.sin(self.cfg.latitude) + np.cos(self.cfg.latitude) * np.cos(hour_angle) * np.cos(self.cfg.dec)
+			sun_up = mu > 0.001
+			F = sun_up.astype(float)
+		else:
 			if self.cfg.sun:
 				mu = np.ones_like(mu)
 				F = np.ones_like(F)
@@ -85,74 +96,114 @@ class Simulator:
 		
 		self.mu_array = mu
 		self.F_array = F
+		if(self.cfg.crater):
+			#Need to calculate x and y vectors for the 3D crater thermal model. 
+			# Old equations used in Cimlib. 
+			# Sun rises at +y (east)
+			# swings around to the +x direction (towards equator)
+			# setting at -y (west)
+			# Always stuck as a positive hemisphere (sun always goes to +x, even if lat is <0)
+			# Does not work on latitude = 0 due to divisin by 0 in azimuth angle equation. 
+			#sinazim = -np.sin(hour_angle)*np.cos(self.cfg.dec)/np.sin(np.arccos(mu))
+			#sun_x = np.sin(np.acos(mu))*np.cos(np.asin(sinazim))
+			#sun_y = np.sin(np.acos(mu))*sinazim
+			#sun_z = mu.copy()
 
-	def _bc(self):
+			# Simplified equations adjusted to same convention: +y is east, +x is south
+			# sun rises at +y (east)
+			# swings around to +x direction (south to equator) if lat is positive
+			# sets at -y (west)
+			# Can handle signed latitude,  non-zero declination, and zero latitude, whereas old equations could not. 
+			# sun_x is eqivalent to sun north value
+			# sun_y is equivalent to sun east value
+			if(self.cfg.diurnal):
+				self.sun_x = -np.sin(self.cfg.dec)*np.cos(self.cfg.latitude) + np.cos(self.cfg.dec)*np.cos(hour_angle)*np.sin(self.cfg.latitude) #made this negative so that it goes to +x at noon if lat>0
+				self.sun_y = -np.cos(self.cfg.dec)*np.sin(hour_angle)
+				self.sun_z = mu.copy()
+			else:
+				self.sun_x = np.zeros_like(mu)
+				self.sun_y = np.zeros_like(mu)
+				if(self.cfg.sun):
+					self.sun_z = np.ones_like(mu)
+				else:
+					self.sun_z = -np.ones_like(mu)
+
+
+	def _bc(self, T, T_surf=0.0, Q = None):
 		if not self.cfg.use_RTE:
 			# Non-RTE boundary conditions, solves for surface temperature based on the heat flux balance.
-			self._bc_noRTE()
+			T, T_surf = self._bc_noRTE(T,T_surf, Q)
 		else:
 			# Neumann boundary condition for surface, as required by RTE.
-			self.T[0]  = self.T[1]
+			T[0]  = T[1]
 			#Bottom boundary condition:
 			if self.cfg.bottom_bc == "neumann":
-				self.T[-1] = self.T[-2]
+				T[-1] = T[-2]
 			elif self.cfg.bottom_bc == "dirichlet":
-				self.T[-1] = self.cfg.T_bottom
+				T[-1] = self.cfg.T_bottom
 			else:
 				raise ValueError(f"Invalid bottom boundary condition: {self.cfg.bottom_bc}. Choose 'neumann' or 'dirichlet'.")
+		return T, T_surf
 
-	def _bc_noRTE(self):
+	def _bc_noRTE(self, T, T_surf, Q):
 		"""Upper boundary for non-RTE mode, plus bottom according to bottom_bc."""
 		#Compute T_surf
-		self._T_surf_calc()
+		T_surf = self._T_surf_calc(T,T_surf, Q)
 		#Set virtual node (x[0]) to enforce the correct flux
-		self.T[0] = (self.T[1] - self.T_surf)*(self.grid.x[0]/self.grid.x[1]) + self.T_surf
+		T[0] = (T[1] - T_surf)*(self.grid.x[0]/self.grid.x[1]) + T_surf
 
 		#bottom BC:
 		if self.cfg.bottom_bc == "neumann":
-			self.T[-1] = self.T[-2]
+			T[-1] = T[-2]
 		elif self.cfg.bottom_bc == "dirichlet":
-			self.T[-1] = self.cfg.T_bottom
+			T[-1] = self.cfg.T_bottom
 		else:
 			raise ValueError(f"Invalid bottom boundary condition: {self.cfg.bottom_bc}. Choose 'neumann' or 'dirichlet'.")
+		return T, T_surf
 
-	def _T_surf_calc(self):
+	def _T_surf_calc(self, T, T_surf, Q):
 		"""Newton‐solve for the surface temperature."""
-		T1 = self.T[1]
-		S = self.F * self.cfg.J * self.mu * (1 - self.cfg.albedo)
+		#T_surf argument is starting guess, from previous time step. Can be singular value or array.  
+		#Q argument should be incoming flux from self-heating, direct, and indirect sunlight. 
+		# if Q is not supplied, direct solar heating only is assumed and calculated here. 
+		T1 = T[1]
+		if(Q is None):
+			Q = self.F * self.cfg.J * self.mu * (1 - self.cfg.albedo)
 		se = self.cfg.sigma * self.cfg.em
 		#distance from first node to the surface, which occurs halfway between this node and virtual node. Converting x units from tau to m here. 
 		dx = ((self.grid.x[1] - self.grid.x[0])/2.)/self.cfg.Et 
 		k_dx = self.cfg.k_dust/dx
 		for it in range(self.cfg.T_surf_max_iter):
 			#Calculate surface temperature T_surf with Newton's method.
-			W =  (S + k_dx*(T1 - self.T_surf) - se*self.T_surf**4.)
-			dWdT = (-k_dx - 4.*se*self.T_surf**3.)
+			W =  (Q + k_dx*(T1 - T_surf) - se*T_surf**4.)
+			dWdT = (-k_dx - 4.*se*T_surf**3.)
 			dT = W/dWdT
-			if np.abs(dT) < self.cfg.T_surf_tol:
+			if np.all(np.abs(dT) < self.cfg.T_surf_tol):
 				break
-			self.T_surf -= dT
+			T_surf -= dT
 		else:
-			print("Warning: T_surf solver exceeded max_iter")  
+			print("Warning: T_surf solver exceeded max_iter")
+		return T_surf
 
-	def _fd1d_heat_implicit_diag(self):
+	def _fd1d_heat_implicit_diag(self, T, source_term=0):
 		"""
 		Implicit heat solver (banded) for one time step:
 		solves diag * U_new = U_old + dt * source_term.
 		"""
-		b = self.T + self.grid.dt * self.source_term
+
+		b = T + self.grid.dt * source_term
 		if(not self.cfg.single_layer and self.cfg.use_RTE):
 			#the boundary flux value is stored in the source_term array in position nlay_dust+1
 			i = self.grid.nlay_dust
-			b[i+1] -= self.grid.dt * self.source_term[i+1] #clear the source term for the interface node, which is not a real node in the grid.
-			dz_rho_cp_i   = self.grid.l_thick[i] * self.grid.dens[i] * self.grid.heat[i]/self.cfg.Et
+			b[i+1] -= self.grid.dt * source_term[i+1] #clear the source term for the interface node, which is not a real node in the grid.
+			#dz_rho_cp_i   = self.grid.l_thick[i] * self.grid.dens[i] * self.grid.heat[i]/self.cfg.Et
 			dz_rho_cp_ip1 = self.grid.l_thick[i+1] * self.grid.dens[i+1] * self.grid.heat[i+1]/self.cfg.Et
 			#Choose one of the two following options, modifying b[i] or b[i+1]. Unclear if one is better than the other.
-			#b[i] += self.grid.dt * self.source_term[i+1] / dz_rho_cp_i
-			b[i+1] += self.grid.dt * self.source_term[i+1] / dz_rho_cp_ip1
+			#b[i] += self.grid.dt * source_term[i+1] / dz_rho_cp_i
+			b[i+1] += self.grid.dt * source_term[i+1] / dz_rho_cp_ip1
 		# Solve banded system
 		U_new = solve_banded((1, 1), self.grid.diag, b)
-		self.T = U_new
+		return U_new
 		# Apply boundary conditions
 
 
@@ -160,8 +211,6 @@ class Simulator:
 		"""Initialize state variables and output arrays."""
 		# Initial temperature field (K)
 		self.T = np.zeros(self.grid.x_num) + self.cfg.T_bottom
-		# Radiative source vector
-		self.source_term = np.zeros(self.grid.x_num)
 		# Initialize surface temp for non-RTE models
 		self.T_surf = self.cfg.T_bottom
 		
@@ -176,7 +225,6 @@ class Simulator:
 		self.phi_therm_out = np.zeros((self.grid.nlay_dust, n_out))
 		self.T_surf_out = np.zeros(n_out)
 
-		
 		# Arrays for storing integration step results for interpolation
 		self.T_history = []
 		self.phi_vis_history = []
@@ -184,8 +232,21 @@ class Simulator:
 		self.T_surf_history = []
 		self.t_history = []
 
+		if self.cfg.crater:
+			n_facets = len(self.crater_mesh.normals)
+			n_out = len(self.t_out)
+			self.T_crater = np.zeros((self.grid.x_num,n_facets)) + self.cfg.T_bottom  # [depth, facets]
+			self.T_surf_crater = np.zeros(n_facets) + self.cfg.T_bottom
+			self.T_crater_history = []  # [n_facets, depth] at each step
+			self.T_surf_crater_history = []
+			self.F_crater_obs_history = []  # [n_facets] at each step
+			self.T_crater_out = np.zeros((self.grid.x_num,n_facets, n_out))  # surface temp for each facet at each output time
+			self.T_surf_crater_out = np.zeros((n_facets,n_out))
+			self.F_crater_obs_out = np.zeros((n_facets, n_out))  # observed flux for each facet at each output time
+
+
 	def _make_outputs(self):
-		"""Interpolate integration results to desired output times, or just use final step for non-diurnal. Always compute DISORT radiance if needed."""
+		"""Interpolate integration results to desired output times, or just use final step for non-diurnal. Always compute DISORT radiance if needed. Also handles crater outputs."""
 		from scipy.interpolate import interp1d
 		non_diurnal = not self.cfg.diurnal
 		if non_diurnal:
@@ -196,18 +257,23 @@ class Simulator:
 				self.phi_therm_out = np.expand_dims(self.phi_therm_history[-1], axis=1)
 			self.t_out = np.array([self.t_history[-1]])
 			self.mu_out = np.array([self.mu_array[-1]])
+			# Crater outputs (non-diurnal): just take last state
+			if self.cfg.crater:
+				self.T_crater_out = np.expand_dims(self.T_crater.copy(), axis=2)[:, :, 0]  # [depth, facets, 1] -> [depth, facets]
+				self.T_surf_crater_out = np.expand_dims(self.T_surf_crater.copy(), axis=1)  # [facets] -> [facets, 1]
 		else:
-			#Interpolate outputs to the desired user frequency, across whole sim or just in final day. 
-			# Convert history lists to arrays for interpolation
+			# Interpolate outputs to the desired user frequency, across whole sim or just in final day. 
 			t_hist = np.array(self.t_history)
 			T_hist = np.stack(self.T_history, axis=1)
 			if(self.cfg.use_RTE and self.cfg.RTE_solver == 'hapke'):
 				phi_vis_hist = np.stack(self.phi_vis_history, axis=1)
 				phi_therm_hist = np.stack(self.phi_therm_history, axis=1)
 			T_surf_hist = np.array(self.T_surf_history)
-			
+			# Crater histories
+			if self.cfg.crater and len(self.T_crater_history) > 0:
+				T_crater_hist = np.stack(self.T_crater_history, axis=2)  # [depth, facets, time]
+				T_surf_crater_hist = np.stack(self.T_surf_crater_history, axis=1)  # [facets, time]
 			# Ensure output times are within the simulation time range with a small buffer
-			# to avoid floating point edge cases
 			t_min = t_hist[0]
 			t_max = t_hist[-1]
 			dt = np.mean(np.diff(t_hist))  # Average time step
@@ -234,6 +300,22 @@ class Simulator:
 					self.phi_therm_out = phi_therm_interp(t_out_clipped)
 				self.T_surf_out = T_surf_interp(t_out_clipped)
 				self.mu_out = mu_interp(t_out_clipped)
+				# Crater outputs: interpolate for each facet and depth
+				if self.cfg.crater and len(self.T_crater_history) > 0:
+					n_depth, n_facets, n_hist = T_crater_hist.shape
+					n_out = len(self.t_out)
+					self.T_crater_out = np.zeros((n_depth, n_facets, n_out))
+					for i in range(n_facets):
+						for d in range(n_depth):
+							interp_func = interp1d(t_hist, T_crater_hist[d, i, :], kind='cubic',
+												   bounds_error=True, assume_sorted=True)
+							self.T_crater_out[d, i, :] = interp_func(t_out_clipped)
+					# Surface temperature for each facet
+					self.T_surf_crater_out = np.zeros((n_facets, n_out))
+					for i in range(n_facets):
+						interp_func = interp1d(t_hist, T_surf_crater_hist[i, :], kind='cubic',
+											   bounds_error=True, assume_sorted=True)
+						self.T_surf_crater_out[i, :] = interp_func(t_out_clipped)
 			except ValueError as e:
 				print(f"Warning in interpolation: {e}")
 				# Fall back to linear interpolation if cubic fails
@@ -243,8 +325,11 @@ class Simulator:
 					self.phi_therm_out = phi_therm_hist[:, -len(self.t_out):]
 				self.T_surf_out = T_surf_hist[-len(self.t_out):]
 				self.mu_out = self.mu_array[-len(self.t_out):]
+				# Crater outputs: fallback to last available
+				if self.cfg.crater and len(self.T_crater_history) > 0:
+					self.T_crater_out = T_crater_hist[:, :, -len(self.t_out):]
+					self.T_surf_crater_out = T_surf_crater_hist[:, -len(self.t_out):]
 
-		
 		if(self.cfg.use_RTE and self.cfg.RTE_solver=='disort'):
 			#Reinitialize disort to get observer radiance values at output times. 
 			#This will trigger the loading of new optical constants files for multi-wave, which optionally can 
@@ -291,25 +376,30 @@ class Simulator:
 		tol = getattr(self.cfg, 'steady_tol', 0.2)         # Convergence threshold (K to extremum)
 		converged = False
 
+		source_term = np.zeros(self.grid.x_num)
+
 		for j in range(self.t_num):
 			self.current_time = self.t[j]
 			self.current_step = j
 			self.mu = self.mu_array[j]
 			self.F = self.F_array[j]
 
+			#Smooth surface model. 
 			if j > 0:
 				# Compute radiative source term (if RTE enabled, otherwise remains zero)
 				if self.cfg.use_RTE:
 					if(self.cfg.RTE_solver == 'hapke'):
-						self.source_term = self.rte_hapke.compute_source(self.T, self.mu, self.F)
+						source_term = self.rte_hapke.compute_source(self.T, self.mu, self.F)
 					elif(self.cfg.RTE_solver == 'disort'):
-						self.source_term = self.rte_disort.disort_run(self.T,self.mu,self.F)
+						source_term = self.rte_disort.disort_run(self.T,self.mu,self.F)
 					else:
 						print("Error: Invalid RTE solver choice! Options are hapke or disort, or set use_RTE to False")
 						return self.T_out, self.phi_vis_out, self.phi_therm_out, self.T_surf_out, self.t_out
 				# Advance heat equation implicitly
-				self._fd1d_heat_implicit_diag()
-				self._bc()
+				self.T = self._fd1d_heat_implicit_diag(self.T,source_term)
+				#Apply boundary conditions. 
+				self.T, self.T_surf = self._bc(self.T, self.T_surf)
+
 
 			# Store current state for interpolation
 			self.T_history.append(self.T.copy())
@@ -319,7 +409,38 @@ class Simulator:
 				self.phi_vis_history.append(self.rte_hapke.phi_vis_prev.copy())
 				self.phi_therm_history.append(self.rte_hapke.phi_therm_prev.copy())
 
-			# Terminate here for fixed temperature run, saving outputs at initialization temperature. 
+			if self.cfg.crater:
+				if j > 0:
+					#sun vector (pointing towards sun)
+					sun_vec = np.array([self.sun_x[j], self.sun_y[j], self.sun_z[j]])
+					#Calculate which crater facets are illuminated by the sun.
+					if(self.F>0):
+						if j%self.cfg.illum_freq==0:
+							illuminated = self.crater_shadowtester.illuminated_facets(sun_vec)
+					else:
+						illuminated = np.zeros_like(self.T_surf_crater)
+					#Get direct visible flux, scattered visible flux, and self heating thermal flux for all crater facets. 
+					Q_dir, Q_scat, Q_selfheat = self.crater_radtrans.compute_fluxes(
+						sun_vec, illuminated, self.T_surf_crater,multiple_scatter=True
+						)
+					if self.cfg.use_RTE:
+						if(self.cfg.RTE_solver == 'hapke'):
+							source_term = self.rte_hapke.compute_source(self.T, self.mu, self.F)
+						elif(self.cfg.RTE_solver == 'disort'):
+							source_term = self.rte_disort.disort_run(self.T,self.mu,self.F)
+						else:
+							print("Error: Invalid RTE solver choice! Options are hapke or disort, or set use_RTE to False")
+							return self.T_out, self.phi_vis_out, self.phi_therm_out, self.T_surf_out, self.t_out
+					# Advance heat equation with solve_banded (must be looped)
+					for i in np.arange(len(self.T_surf_crater)):
+						self.T_crater[:,i] = self._fd1d_heat_implicit_diag(self.T_crater[:,i],source_term)
+					#Apply boundary conditions, which is vectorized and doesn't require a loop. 
+					self.T_crater, self.T_surf_crater = self._bc(self.T_crater, self.T_surf_crater,Q_dir+Q_scat+Q_selfheat)
+				self.T_crater_history.append(self.T_crater.copy())
+				self.T_surf_crater_history.append(self.T_surf_crater.copy())
+
+
+			# Terminate here for fixed temperature run, saving outputs at initialization temperature. Useful for spectroscopy. 
 			if(self.cfg.T_fixed and not self.cfg.diurnal):
 				break
 
@@ -457,7 +578,116 @@ def fit_blackbody_broadband(sim,radiance,idx=-1):
 	return T_fit
 
 def calculate_interface_T(T,i,alpha,beta):
-    return((alpha*T[i] + beta*T[i+1])/(alpha + beta))
+	return((alpha*T[i] + beta*T[i+1])/(alpha + beta))
+
+# --- Crater effective brightness temperature calculation and plot ---
+def crater_brightness_temperature(sim, obs_vec=None, time_idx=None, plot=True):
+	"""
+	Calculate effective brightness temperature of the crater as seen by an observer.
+	Args:
+		sim: Simulator object
+		obs_vec: observer direction (3,), default is [0,0,1] (overhead)
+		time_idx: if not None, only compute for this time index
+		plot: if True, plot the time series
+	Returns:
+		Tb_time: array of brightness temperature vs time
+	"""
+	from scipy.constants import sigma
+	if obs_vec is None:
+		obs_vec = np.array([0,0,1])
+	obs_vec = np.array(obs_vec) / np.linalg.norm(obs_vec)
+	mesh = sim.crater_mesh
+	shadowtester = sim.crater_shadowtester
+	Tsurf = sim.T_surf_crater_out  # shape: (n_facets, n_out)
+	n_facets, n_out = Tsurf.shape
+	# Get facet normals and areas
+	normals = mesh.normals  # (n_facets, 3)
+	areas = mesh.areas     # (n_facets,)
+	# Projected area for each facet as seen by observer
+	proj = np.dot(normals, obs_vec)
+	proj[proj < 0] = 0.0  # Only facets facing observer
+	# For each time, get visibility (fractional, e.g. 0 or 1 for now)
+	# Use shadowtester to get which facets are visible to observer (0 to 1)
+	visible = shadowtester.illuminated_facets(obs_vec)
+	Tb_time = np.zeros(n_out)
+	for t in range(n_out):
+		# If illuminated_facets returns bool, convert to float
+		#visible = np.asarray(visible, dtype=float)
+		# Mesh-area-weighted sum of emission (Stefan-Boltzmann law)
+		# Only include visible facets and projected area
+		numer = np.sum(areas * proj * visible * (Tsurf[:,t]**4))
+		denom = np.sum(areas * proj * visible)
+		if denom > 0:
+			Tb_time[t] = numer/denom
+			Tb_time[t] = Tb_time[t]**0.25
+		else:
+			Tb_time[t] = np.nan
+	if plot:
+		import matplotlib.pyplot as plt
+		plt.figure()
+		plt.plot(sim.t_out/3600, Tb_time, label='Crater Brightness Temp (observer)')
+		plt.xlabel('Time (hours)')
+		plt.ylabel('Brightness Temperature (K)')
+		plt.title('Crater Effective Brightness Temperature vs Time')
+		plt.legend()
+		plt.grid(True)
+		plt.tight_layout()
+		plt.show()
+	return(Tb_time)
+
+
+def interactive_crater_temp_viewer(mesh, T_history, dt):
+	"""
+	Interactive 3D viewer for crater temperature time series.
+	Args:
+		mesh: your CraterMesh object (with .vertices, .faces)
+		T_history: array [n_time, n_facets, n_depth] (use T_history[:,:,0] for surface)
+		dt: timestep in seconds
+	"""
+	import numpy as np
+	import matplotlib.pyplot as plt
+	from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+	from matplotlib.widgets import Slider
+	verts = mesh.vertices
+	faces = mesh.faces
+	n_times = T_history.shape[1]
+	fig = plt.figure(figsize=(10, 8))
+	ax = fig.add_subplot(111, projection='3d')
+
+	# Initial plot
+	time_idx = 0
+	temp = T_history[:,time_idx]
+	norm = plt.Normalize(np.min(T_history[:,:]), np.max(T_history[:,:]))
+	facecolors = plt.cm.inferno(norm(temp))
+	poly3d = [verts[face] for face in faces]
+	pc = Poly3DCollection(poly3d, facecolors=facecolors, edgecolor='k', linewidths=0.05)
+	meshplot = ax.add_collection3d(pc)
+
+	ax.set_xlim([verts[:,0].min(), verts[:,0].max()])
+	ax.set_ylim([verts[:,1].min(), verts[:,1].max()])
+	ax.set_zlim([verts[:,2].min(), verts[:,2].max()])
+	ax.set_box_aspect([2,2,1])
+	ax.set_title(f"Time = {time_idx*dt:.1f} s")
+	mappable = plt.cm.ScalarMappable(cmap='inferno', norm=norm)
+	cbar = plt.colorbar(mappable, ax=ax, shrink=0.6)
+	cbar.set_label("Surface Temperature [K]")
+
+	# Slider
+	axcolor = 'lightgoldenrodyellow'
+	ax_slider = plt.axes([0.2, 0.01, 0.6, 0.03], facecolor=axcolor)
+	slider = Slider(ax_slider, 'Time Step', 0, n_times-1, valinit=0, valfmt='%d')
+
+	def update(val):
+		tidx = int(slider.val)
+		temp = T_history[:,tidx]
+		# Update color
+		new_facecolors = plt.cm.inferno(norm(temp))
+		pc.set_facecolor(new_facecolors)
+		ax.set_title(f"Time = {tidx*dt:.1f} s")
+		fig.canvas.draw_idle()
+
+	slider.on_changed(update)
+	plt.show()
 
 if __name__ == "__main__":
 	sim = Simulator()
@@ -482,13 +712,15 @@ if __name__ == "__main__":
 				plt.plot(sim.t_out / 3600, sim.rad_T_out, label='Radiance Fit Temperature')
 		else:
 			plt.plot(sim.t_out / 3600, T_surf_out, label='Surface Temperature (no RTE)')
+		if sim.cfg.crater and hasattr(sim, 'T_surf_crater_out'):
+			btemp = crater_brightness_temperature(sim, obs_vec=[0,0,1],plot=False)
+			plt.plot(sim.t_out / 3600, btemp,label='Crater brightness temperature')
 		plt.xlabel('Time (hours)')
 		plt.ylabel('Temperature (K)')
 		plt.title('Surface Temperature vs Time')
 		plt.legend()
 		plt.tight_layout()
 		plt.show()
-
 
 
 	# Plot temperature vs depth profiles for final day
@@ -595,3 +827,13 @@ if __name__ == "__main__":
 		plt.grid(True)
 		plt.gca().invert_xaxis()
 		plt.show()
+
+	# --- Crater 3D surface temperature visualization ---
+	if sim.cfg.crater and hasattr(sim, 'T_surf_crater_out'):
+		# ...existing 3D viewer code (not shown for brevity)...
+
+		# Usage:
+		interactive_crater_temp_viewer(sim.crater_mesh, sim.T_surf_crater_out, sim.grid.dt)
+
+
+		

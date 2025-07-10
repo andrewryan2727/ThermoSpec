@@ -23,16 +23,22 @@ class SimulationConfig:
     albedo: float = 0.0178              # surface albedo, ONLY USED FOR NON-RTE MODELS
 
     # Orbital & rotational parameters
-    R: float = 1.2447                   # heliocentric distance (AU)
-    latitude: float = 0.0 * np.pi/180.0  # latitude (rad)
+    R: float = 1.0                   # heliocentric distance (AU)
+    S: float = 1366.0                 #Solar constant. 
+    latitude: float = np.radians(55.0) # latitude (rad)
+    dec: float = np.radians(0.0)     #Solar declination angle (rad)
     P: float = 4.296 * 3600.0        #Rotational period in s
 
+    crater: bool = True            #Run hemispherical crater approximation alongside smooth model. Much slower! 
+    illum_freq: int = 20            #Frequency at which to recompute rays for crater illumination/shadowing. I.e., every N time steps. 
+    #crater_obs_vec: float [1,0,1]
+
     # Dust (or top layer) material properties
-    single_layer: bool = False        # use single-layer model instead of two-layer. If single layer, only dust properties are used. 
-    k_dust: float = 5.5e-4           # dust thermal conductivity (W/m/K). If using RTE model, this should just be phonon conduction. 5.5e-4
-    rho_dust: float = 366.         # dust bulk density (kg/m^3)
-    cp_dust: float = 700.0           # dust specific heat (J/kg/K)
-    k_dust_auto: bool = True        # use auto-calculated dust thermal conductivity for non-RTE models. If False, use k_dust value directly.
+    single_layer: bool = True        # use single-layer model instead of two-layer. If single layer, only dust properties are used. 
+    k_dust: float = 0.05           # dust thermal conductivity (W/m/K). If using RTE model, this should just be phonon conduction. 5.5e-4
+    rho_dust: float = 1800         # dust bulk density (kg/m^3) 366
+    cp_dust: float = 700.0           # dust specific heat (J/kg/K) 700
+    k_dust_auto: bool = False        # use auto-calculated dust thermal conductivity for non-RTE models. If False, use k_dust value directly.
 
     # Rock (or substrate) material properties
     k_rock: float = 1.0              # rock thermal conductivity (W/m/K)
@@ -40,11 +46,11 @@ class SimulationConfig:
     cp_rock: float = 700.0           # rock heat capacity (J/kg/K)
 
     # Boundary & layer settings
-    T_bottom: float = 270.           # bottom boundary temperature (when Dirichlet) and global initialization temperature (K)
-    dust_thickness: float = 100.0e-6  # dust column total thickness (m)
-    rock_thickness: float = 0.50     # rock substrate column total thickness (m)
+    T_bottom: float = 260.           # bottom boundary temperature (when Dirichlet) and global initialization temperature (K)
+    dust_thickness: float = 0.5  # dust column total thickness (m)
+    rock_thickness: float = 1.0     # rock substrate column total thickness (m)
     auto_thickness: bool = True      # auto-calculate dust and rock layer thicknesses based on thermal skin depth
-    flay: float = 0.15               # First layer thickness (fraction of skin depth) if using auto thickness.
+    flay: float = 0.1               # First layer thickness (fraction of skin depth) if using auto thickness.
     geometric_spacing: bool = True   # Node spacing increases by factor spacing_factor, otherwise constant thickness. Only applies to single layer scenario. 
     spacing_factor: float = 1.05     # layer thickness increase factor for geometric spacing. Only applies to single layer scenario!
 
@@ -53,15 +59,14 @@ class SimulationConfig:
     rock_lthick: float = 0.0025      # rock node spacing (m), only used if auto_thickness is False.
 
     # Simulation flags and convergence settings
-    use_RTE: bool = True             # use radiative transfer model, otherwise runs traditional thermal model. 
+    use_RTE: bool = False             # use radiative transfer model, otherwise runs traditional thermal model. 
     RTE_solver: str = 'disort'       # Options are 'disort' or 'hapke'
     bottom_bc: str = 'neumann'       # bottom boundary condition choices: "neumann" (zero‐flux), "dirichlet" (fixed T_bottom)
     sun: bool = True                 # include solar input
     diurnal: bool = True             # include diurnal variation. If false, model is steady-state. 
 
-
     # Time-stepping parameters
-    ndays: int = 2                   # total simulation days (diurnal cycles)
+    ndays: int = 1                   # total simulation days (diurnal cycles)
     auto_dt: bool = True             # auto-calculate time step based on thermal skin depth
     freq_out: int = 50              # Number of outputs per diurnal cycle. 
     last_day: bool = True            # If True, only output last day of simulation. Otherwise, output all days.
@@ -74,7 +79,7 @@ class SimulationConfig:
     minsteps: int = 10000            # Minimum number of time steps per day. Used if auto_dt is True. Default=2500. Try setting to a higher number if you think your model is inaccurate.  
     min_nlay_dust: int = 12         # Minimum number of grid points within dust column for two-layer scenario. Default=12. 
     rock_lthick_fac: float = 0.2    # Factor by which to multiply auto-calculated rock layer thickness. This is used to ensure that the rock layer is not too thick compared to the dust layer. Default=0.25. 
-    dust_rte_max_lthick: float = 0.05  # Maximum first grid layer thickness for RTE model (in tau units, i.e., optical opacity). Default=0.025
+    dust_rte_max_lthick: float = 0.1  # Maximum first grid layer thickness for RTE model (in tau units, i.e., optical opacity). Default=0.025
 
     custom_bvp: bool = True          # use the custom written bvp solver for the hapke RTE. Otherwise, reverts to scipy.solve_bvp (which may not actually work anymore)
     bvp_tol: float = 1.0e-8          # tolerance for BVP solver
@@ -86,12 +91,12 @@ class SimulationConfig:
     #DISORT radiative transfer options. 
     ##################################
     # Note that nmom and nstr are usuall equal. 
-    nmom: int = 8            # Number of moments to phase function. But be >= nstr. Recommended ≥4
-    nstr: int = 8            # Number of streams for disort discrete ordinate method. Recommended ≥4
+    nmom: int = 4            # Number of moments to phase function. But be >= nstr. Recommended ≥4
+    nstr: int = 4            # Number of streams for disort discrete ordinate method. Recommended ≥4
     g: float = 0.0            # Scattering assymetry parameter for non-multi_wave scenarios. 
 
     #DISORT multi-wavelength options. Note that Cext in files is assumed to be in units of µm^2, as it is likely that the user defined particle size and wavelength in µm. 
-    multi_wave: bool = True  # Use multiple wavelengths, using wavelength-dependent optical properties from file (extinction coefficient, ssalb, scattering matrix moments)
+    multi_wave: bool = False  # Use multiple wavelengths, using wavelength-dependent optical properties from file (extinction coefficient, ssalb, scattering matrix moments)
     T_fixed: bool = False    # Use initialization temperature to calculate radiance and emissivity spectra. No thermal evolution. Only valid if diurnal=False. 
     #folder: str = "/Users/ryan/Research/RT_models/RT_thermal_model/optical_constants/Quartz_5micron_30wns/pack_frac_0.35/output" #path to scattering table files
     mie_file: str = "/Users/ryan/Research/RT_models/RT_thermal_model/Preprocessing/serp85_mag5_dol5_graph5_10um_32.txt"   #Table of values from Mie code.  
@@ -99,7 +104,7 @@ class SimulationConfig:
     substrate_spectrum: str = '/Users/ryan/Research/RT_models/RT_thermal_model/Preprocessing/Orgueil_P11442_VEH_32wns.txt' #Bennu emissivity spectrum for substrate
     wn_bounds: str = '/Users/ryan/Research/RT_models/RT_thermal_model/Preprocessing/wn_bounds_32.txt' #Wavenumber bounds for input files.
     use_spec: bool = True     #Use emissivity spectrum for substrate. If false, uses global reflectivity value R_base
-    R_base: float = 0.0       # Substrate reflectivity for 2-layer model. Used if multi_wave=False and/or use_spec=False. 
+    R_base: float = 0.05       # Substrate reflectivity for 2-layer model. Used if multi_wave=False and/or use_spec=False. 
     fill_frac: float = 0.15   #Fill fraction for particles. 
     radius: float = 10.0e-6    #Particle radius in meters. 
     
@@ -138,7 +143,7 @@ class SimulationConfig:
         # Derived radiative parameter
         self.gamma_vis = np.sqrt(1.0 - self.ssalb_vis)
         # Solar irradiance at distance R (W/m^2)
-        self.J = 1366.0 / (self.R ** 2.0)
+        self.J = self.S / (self.R ** 2.0)
         # Radiative ratio q
         self.q = 1.0 / (self.k_dust * self.Et)
         if(self.k_dust_auto and not self.use_RTE):

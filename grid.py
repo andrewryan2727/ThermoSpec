@@ -232,7 +232,9 @@ class LayerGrid:
         #Calculate time increment here. 
         if cfg.auto_dt:
             # Calculate dt based on stability criterion
-            dt_stability = cfg.dtfac*np.min(lthick / K / cfg.Et)
+            method1 = cfg.dtfac*np.min(lthick / K/ cfg.Et)
+            method2 = np.min(lthick**2. / K)
+            dt_stability = np.max((method1,method2))
             # Adjust dt to be nearly divisible by period
             steps_per_day = np.ceil(cfg.P / dt_stability)
             #Never fewer than 200 steps per day
