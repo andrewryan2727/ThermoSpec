@@ -14,7 +14,7 @@
 #Note that these boundary problems are specifically designed for the Hapke RTE model.
 # They are not general-purpose solvers.
 
-def solve_bvp_vis(x, Fun, u, J, A,h0,hN,T,tol=1e-8, max_iter=50):
+def solve_bvp_vis(x, Fun, u, J, A,h0,hN,Q,T,tol=1e-8, max_iter=50):
     # Boundary value solver specifically for the visible RTE
     # Also could be used for thermal RTE in single-layer scenario. 
     # Boundary conditions are baked in! 
@@ -38,9 +38,9 @@ def solve_bvp_vis(x, Fun, u, J, A,h0,hN,T,tol=1e-8, max_iter=50):
     R = np.zeros(N+1)
     for it in range(max_iter):
         # Downards stream = 0
-        R[0] = (2*h0 + 1)*u[0] - u[1]
+        R[0] = (2*h0 + 1)*u[0] - u[1] - 2*h0*Q
         # interior i=1..N-1
-        R[1:N] =  A1*u[0:N-1] + A2*u[1:N] + A3*u[2:N+1] - Fun(x[1:-1],(u[1:-1],u[1:-1]),T[2:N+1])[1]
+        R[1:N] =  A1*u[0:N-1] + A2*u[1:N] + A3*u[2:N+1] - Fun(x[1:-1],u[1:-1],T[2:N+1])
         # Upwards stream = 0
         R[N] = -u[N-1] + (2*hN + 1)*u[N]
 
@@ -62,7 +62,7 @@ def solve_bvp_vis(x, Fun, u, J, A,h0,hN,T,tol=1e-8, max_iter=50):
 
     return u
 
-def solve_bvp_therm(x, Fun, u, J, A,h0,hN,D,T,single_layer = True,tol=1e-8, max_iter=50):
+def solve_bvp_therm(x, Fun, u, J, A,h0,hN,D,Q,T,single_layer = True,tol=1e-8, max_iter=50):
     # Boundary value solver specifically for the thermal RTE in the two-layer scenario. 
     # Boundary conditions are baked in!   
     # Solve u'' = F(u), 0<=x<=L, with boundary conditions:
@@ -86,9 +86,9 @@ def solve_bvp_therm(x, Fun, u, J, A,h0,hN,D,T,single_layer = True,tol=1e-8, max_
 
     for it in range(max_iter):        
         # boundary at i=0:  (2h+1) u0 - u1 = 0
-        R[0] = (2*h0 + 1)*u[0] - u[1]
+        R[0] = (2*h0 + 1)*u[0] - u[1] - 2*h0*Q
         # interior i=1..N-1
-        R[1:N] =  A1*u[0:N-1] + A2*u[1:N] + A3*u[2:N+1] - Fun(x[1:-1],(u[1:-1],u[1:-1]),T[2:N+1])[1]
+        R[1:N] =  A1*u[0:N-1] + A2*u[1:N] + A3*u[2:N+1] - Fun(x[1:-1],u[1:-1],T[2:N+1])
         # boundary at i=N: -u[N-1] + (2h+1) u[N] = 0
         if single_layer:
             # phi_therm = sigma/np.pi * T[-1]**4

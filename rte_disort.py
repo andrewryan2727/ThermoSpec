@@ -1,18 +1,18 @@
 import numpy as np
 from pydisort import Disort, DisortOptions, scattering_moments
 import torch
-
+torch.set_default_dtype(torch.float64)
 from config import SimulationConfig
 from grid import LayerGrid
 
-torch.set_default_dtype(torch.float64)
 
 class DisortRTESolver:
-    def __init__(self, config: SimulationConfig, grid: LayerGrid, output_radiance=False, uniform_props=False):
+    def __init__(self, config: SimulationConfig, grid: LayerGrid, output_radiance=False, uniform_props=False,planck=True):
         self.cfg = config
         self.grid = grid
         self.output_radiance = output_radiance
         self.uniform_props = uniform_props
+        self.planck = planck
         #For multi-wavelength cases, load optical and solar constants from files
         if(self.cfg.multi_wave):
             self._load_constants()
@@ -60,11 +60,21 @@ class DisortRTESolver:
         
 
     def _setup_optical_properties(self):
-        """Set up optical properties for DISORT"""
+        #Set up optical properties for simple two-wave disort case (vis and thermal)
         n_layers = len(self.grid.x_RTE)
-        tau_layer = torch.tensor(self.grid.dtau)
-        ssa_layer = torch.full((n_layers,), self.cfg.ssalb_vis)
-        moms = scattering_moments(self.cfg.nmom, "henyey-greenstein", self.cfg.g)
+
+        tau_boundaries = self.grid.x_boundaries #tau at boundaries of each layer, convert from global Et to wavelength-specific Et.  
+        if not self.planck: tau_boundaries *= self.cfg.eta #Convert tau vaues using visible extinction coefficient ratio. 
+        dtau = tau_boundaries[1:] - tau_boundaries[:-1] #tau at boundaries of each layer
+        tau_layer = torch.tensor(dtau)
+        if self.planck:
+            ssalb_val = self.cfg.ssalb_therm
+            g_val = self.cfg.g_therm
+        else:
+            ssalb_val = self.cfg.ssalb_vis
+            g_val = self.cfg.g_vis
+        ssa_layer = torch.full((n_layers,), ssalb_val)
+        moms = scattering_moments(self.cfg.nmom, "henyey-greenstein", g_val)
         moments = torch.stack(
             [torch.full((n_layers,), moms[i]) for i in range(self.cfg.nmom)],
             dim=-1
@@ -122,10 +132,9 @@ class DisortRTESolver:
                     Et = n_p * self.Cext_array[i_wave]*1e-12 #extinction coefficient at this wavelength, converting Cext from µm^2 to m^2 in the process. 
                     if(self.uniform_props):
                         Et = n_p * np.mean(self.Cext_array[self.wn_min:self.wn_max])*1e-12
-                    #Et = Et*0.0 + 100.0 #manual override to fixed value for testing 
+                    Et = Et*0.0 + 1000.0 #manual override to fixed value for testing 
                     tau_boundaries = Et*self.grid.x_boundaries/self.cfg.Et #tau at boundaries of each layer, convert from global Et to wavelength-specific Et.  
-                    #dtau = np.insert(np.diff(tau),0,tau[0]*2)
-                    dtau = tau_boundaries[1:] - tau_boundaries[:-1] #tau at boundaries of each layer
+                    dtau = tau_boundaries[1:] - tau_boundaries[:-1] #tau thickness of each layer
                     tau_layer = torch.tensor(dtau,dtype=torch.float64)
                     ssalb_val = self.ssalb_array[i_wave].copy()
                     if(self.cfg.force_vis_disort and self.wavenumbers[i_wave] >3330.0):
@@ -133,13 +142,16 @@ class DisortRTESolver:
                         ssalb_val = self.cfg.disort_ssalb_vis
                     if(self.uniform_props):
                         ssalb_val = np.mean(self.ssalb_array[self.wn_min:self.wn_max])
-                    #ssalb_val = ssalb_val*0.0 + 0.1 #manual override to fixed value for testing. 
+                    if self.wavenumbers[i_wave] >3330.0: 
+                        ssalb_val = ssalb_val*0.0 + 0.7 #manual override to fixed value for testing VISIBLE. 
+                    else:
+                        ssalb_val = ssalb_val*0.0 #manual override for fixed value testing THERMAL
                     ssa_layer = torch.full([n_layers], ssalb_val,dtype=torch.float64)
                     g_val = self.g_array[i_wave]
-                    #g_val = g_val*0.0 #manual override to fixed value for testing. 
                     if(self.cfg.force_vis_disort and self.wavenumbers[i_wave] >3330.0):
                         #Force all visible wavelengths to use the DISORT default value for visible scattering asymmetry factor
                         g_val = self.cfg.disort_g_vis
+                    g_val = g_val*0.0 #manual override to fixed value for testing. 
                     if(self.uniform_props):
                         g_val = np.mean(self.g_array[self.wn_min:self.wn_max])
                     moms = scattering_moments(self.cfg.nmom, "henyey-greenstein", g_val)
@@ -168,14 +180,21 @@ class DisortRTESolver:
         """Configure DISORT options"""
         op = DisortOptions()
         if(self.output_radiance):
-            op.flags("lamber,quiet,planck,usrang") #calculate radiances on output (slower)
+            #calculate radiances on output (slower) by omitting the onlyfl option. 
+            if self.planck:
+                op.flags("lamber,quiet,usrang,planck")
+            else:
+                op.flags("lamber,quiet,usrang") 
             op.ds().nmom = self.cfg.nmom_out
             op.ds().nstr = self.cfg.nstr_out
             op.ds().nphase = self.cfg.nmom_out
             op.user_mu(np.array([1.0])) #Specify zenith angle for measuring intensity
             op.user_phi(np.array([0.0])) #Specify azimuth angle for measuring intensity. 
         else:
-            op.flags("lamber,quiet,planck,onlyfl,intensity_correction") #Calculate flux only during model run (faster). 
+            if self.planck:
+                op.flags("lamber,quiet,onlyfl,intensity_correction,planck")
+            else:
+                op.flags("lamber,quiet,onlyfl,intensity_correction") #Calculate flux only during model run (faster). 
             op.ds().nmom = self.cfg.nmom
             op.ds().nstr = self.cfg.nstr
             op.ds().nphase = self.cfg.nmom
@@ -209,19 +228,34 @@ class DisortRTESolver:
     
 
 
-    def disort_run(self,  T, mu, F ):
+    def disort_run(self,  T, mu, F , Q=None):
         #Solve RTE using DISORT for both visible and thermal bands.
+
+        if mu<=0: F = 0
 
         if(self.cfg.multi_wave):
             fbeam = torch.tensor(self.solar*F).unsqueeze(1) #Solar flux integrated within each wavenumber band. 
             temis = torch.full([len(self.wavenumbers)],1.0).unsqueeze(1)
+            if Q==None: 
+                fisot = torch.tensor(np.zeros_like(self.wavenumbers)).unsqueeze(1)
+            else:
+                #fisot = torch.tensor(Q).unsqueeze(1)
+                #For now passing global value. TO DO: update to wavelength-dependent later.
+                fisot = torch.full([len(self.wavenumbers)],Q).unsqueeze(1) 
             if(self.cfg.use_spec and not self.uniform_props):
                 albedo = torch.tensor(1.0 - self.emiss_base).unsqueeze(1) #Albedo spectrum for the bottom boundary.
             else:
                 albedo = torch.full([len(self.wavenumbers)],self.cfg.R_base).unsqueeze(1) 
         else:
-            fbeam = torch.tensor([self.cfg.J * F]) #Broadband. Use solar constant. 
+            if self.planck:
+                fbeam = torch.tensor([0.0]) #We're in the thermal two-wave case. No sunlight here. 
+            else:
+                fbeam = torch.tensor([self.cfg.J * F]) #Visible two-wave case. Broadband flux from solar constant.  
             temis = torch.tensor([1.0])
+            if Q==None:
+                fisot = torch.tensor([0.0]) 
+            else:
+                fisot = torch.tensor([Q])
             albedo = torch.tensor([self.cfg.R_base])
 
         if(self.cfg.single_layer):
@@ -229,24 +263,27 @@ class DisortRTESolver:
         else:
             T_interface = calculate_interface_T(T, self.grid.nlay_dust, self.grid.alpha, self.grid.beta)
             btemp = T_interface
-
-        bc = {
+        
+        self.bc = {
             "umu0": torch.tensor([mu]), #Cosine of solar incidence angle
             "phi0": torch.tensor([0.0]), #Azimuth angle of solar incidence. 
             "albedo": albedo, #Albedo of bottom boundary
             "btemp": torch.tensor([btemp]), #Brightness temperature of bottom boundary. 
             "ttemp": torch.tensor([0.0]), #Top boundary temperature (space)
             "temis": temis, #Emissivity of top boundary (space)
-            "fbeam": fbeam #Solar flux
+            "fisot": fisot, #Intensity of top-boundary isotropic illumination (W/m^2)
+            "fbeam": fbeam #Intensity of incidence parallel beam Solar flux (W/m^2)
         }
         
         #Need to interpolate temperature field to be at boundaries of computational layers, rather than at the center.
         #Assuming that the temperature grid is sufficiently dense to allow for a fast linear interpolation.  
         T_interp = np.interp(self.grid.x_boundaries,self.grid.x_RTE,T[1:self.grid.nlay_dust+1])
-        T_tensor = torch.tensor(T_interp).unsqueeze(0)
+        self.T_tensor = torch.tensor(T_interp).unsqueeze(0)
 
-        #Run disort. 
-        result = self.ds.forward(self.prop,'', T_tensor, **bc)
+        #Run disort. Result returns up and down total fluxes. 
+        result = self.ds.forward(self.prop,'', self.T_tensor, **self.bc)
+        fl_up = result[:,0,0,0] #total upwards diffuse flux from top layer, for rough surface scattering modeling. 
+        #result[nwave,ncol,ndepth,up or down]
 
         #DISORT outputs from the gather_flx() method are: 
         # 0.	RFLDIR(lu) - Direct-beam flux (without delta-M scaling)
@@ -258,17 +295,17 @@ class DisortRTESolver:
         # 6.	ALBMED(iu) - Albedo of the medium as a function of incident beam angle cosine UMU(IU)  (IBCND = 1 case only)
         # 7.	TRNMED(iu) - Transmissivity of the medium as a function of incident beam angle cosine UMU(IU)  (IBCND = 1 case only)
 
-        # Up stream minus down stream. 
+        # Up stream minus down stream rough calculation of flux divergence. Not as accurate as what disort provides. 
         #F_net = result[0,0,:,0] - result[0,0,:,1] 
         # Calculate heating rate as flux divergence
         #Q_rad = np.diff(F_net.numpy()) / self.grid.dtau
         if(self.output_radiance):
             #Just return the radiance as viewed by the observer, currently fixed at zenith. 
-            rad = self.ds.gather_rad()
+            rad = self.ds.gather_rad() #rad[nwave,ncol,ndepth,n_obs_direction mu/phi]
             return(rad[:,0,0,0,0])
         else:
             #Get flux divergence. 
-            flx = self.ds.gather_flx()
+            flx = self.ds.gather_flx() #flx[nwave,ncol,ndepth,8 properties] See table above for list of properties. 
             if(self.cfg.multi_wave):
                 #Summation of values from different wavelength bins
                 flux_divergence = flx[:,0,:,3]
@@ -282,8 +319,9 @@ class DisortRTESolver:
             if(not self.cfg.single_layer):
                 #emission = np.pi*np.sum(planck_wn_integrated(self.wn_bins,T_interface)*self.emiss_base)
                 #Radiative flux source term at the rock/dust boundary. They are not multipled by Kq because they are not volumetric. 
+                #Terms on right are down direct-beam flux + down diffuse flux - up diffuse flux. 
                 source_term[self.grid.nlay_dust+1] = torch.sum((flx[:,0,-1,0] + flx[:,0,-1,1] - flx[:,0,-1,2]),dim=0)
-            return source_term
+            return source_term, fl_up
 
 
 

@@ -97,25 +97,27 @@ class ShadowTester:
         index_tri = self.sub_mesh.ray.intersects_first(origins, directions)
         index_ray = np.arange(n_facets)
         illuminated = np.zeros(len(self.centroids))
+        match = index_ray==index_tri
+        dot = np.dot(self.sub_normals,sun_vec)>0
+        illum = match & dot
+        illuminated = np.zeros(len(self.centroids))
         for facet_index in np.arange(len(self.centroids)):
-            for i in self.mapping[facet_index]:
-                if (index_tri[i] == index_ray[i] and np.dot(self.sub_normals[i], sun_vec) > 0):
-                    illuminated[facet_index] += 1.0
+            illuminated[facet_index] = np.sum(illum[self.mapping[facet_index]])
+            #for i in self.mapping[facet_index]:
+                #if (index_tri[i] == index_ray[i] and np.dot(self.sub_normals[i], sun_vec) > 0):
+                #    illuminated[facet_index] += 1.0
         illuminated /= len(index_tri) / len(self.mapping)  # normalize so that 1 = fully illuminated.
         return illuminated
 
 # ------------------ Radiative Source Terms + Multiple Scattering ------------------
 
-class RadiativeTransfer:
-    def __init__(self, mesh, selfheating, albedo=0.4, emissivity=0.9, solar_constant=1361):
+class CraterRadiativeTransfer:
+    def __init__(self, mesh, selfheating):
         self.mesh = mesh
         self.selfheating = selfheating
-        self.albedo = albedo
-        self.eps = emissivity
-        self.solar_constant = solar_constant
         self.view_matrix = self.selfheating.as_view_matrix(len(self.mesh.normals))
 
-    def compute_fluxes(self, sun_vec, illuminated, T_surface, multiple_scatter=True, max_iter=100, tol=1e-6):
+    def compute_fluxes(self, sun_vec, illuminated, T_surface, albedo, emissivity,solar_constant, multiple_scatter=True, max_iter=100, tol=1e-6):
         n_facets = len(self.mesh.normals)
         areas = self.mesh.areas
         # Solar incidence angle
@@ -127,17 +129,15 @@ class RadiativeTransfer:
             # Direct solar absorption
             Q_direct = np.zeros(n_facets)
             mask = (illuminated > 0) & (cosines > 0)
-            Q_direct[mask] = (1 - self.albedo) * self.solar_constant * cosines[mask]
+            Q_direct[mask] = (1 - albedo) * solar_constant * cosines[mask] * illuminated[mask]
 
             # Multiple scattered sunlight 
             if multiple_scatter:
-                F_sun = self.solar_constant
-                Q_scat = compute_multiple_scattered_sunlight(
-                    self.albedo, F_sun, illuminated, cosines, self.view_matrix,
+                F_sun = solar_constant
+                Q_scattered = compute_multiple_scattered_sunlight(
+                    albedo, F_sun, illuminated, cosines, self.view_matrix,
                     max_iter=max_iter, tol=tol
                 )
-                # Only the absorbed (1 - A) part goes into heat:
-                Q_scattered = (1 - self.albedo) * Q_scat
             else:
                 # Single scattering only 
                 Q_scattered = np.zeros(n_facets)
@@ -146,7 +146,7 @@ class RadiativeTransfer:
                     vfs = self.selfheating.view_factors[i]
                     for j_idx, vf in zip(idxs, vfs):
                         if illuminated[j_idx] > 0 and cosines[j_idx] > 0:
-                            Q_scattered[i] += self.albedo * self.solar_constant * illuminated[j_idx]* cosines[j_idx] * vf
+                            Q_scattered[i] += albedo * solar_constant * illuminated[j_idx]* cosines[j_idx] * vf
         else:
             Q_scattered = np.zeros(n_facets)
             Q_direct = np.zeros(n_facets)
@@ -156,46 +156,46 @@ class RadiativeTransfer:
         for i in range(n_facets):
             idxs = self.selfheating.indices[i]
             vfs = self.selfheating.view_factors[i]
-            Q_selfheat[i] = self.eps * sigma * np.sum((T_surface[list(idxs)] ** 4) * vfs)
+            Q_selfheat[i] = emissivity * sigma * np.sum((T_surface[list(idxs)] ** 4) * vfs)
 
-        return Q_direct, Q_scattered, Q_selfheat
+        return Q_direct, Q_scattered, Q_selfheat, cosines
 
 # ---------- Multiple Scattering (Rozitis & Green, Eq 18–20, Iterative) ----------
 
 def compute_multiple_scattered_sunlight(
-    AB, F_sun, illum_frac, sun_cosines, view_matrix, max_iter=100, tol=1e-6
+    Alb, F_sun, illum_frac, sun_cosines, view_matrix, max_iter=100, tol=1e-5
 ):
     N = len(illum_frac)
-    G = AB * F_sun * illum_frac * sun_cosines  # Initial guess
+    G = Alb * F_sun * illum_frac * sun_cosines  # Initial guess
     for iteration in range(max_iter):
         G_new = np.zeros_like(G)
         for i in range(N):
             sum_vf = np.dot(view_matrix[i], G)
-            G_new[i] = AB * (F_sun * illum_frac[i] * sun_cosines[i] + sum_vf)
+            G_new[i] = Alb * (F_sun * illum_frac[i] * sun_cosines[i] + sum_vf)
         if np.allclose(G_new, G, rtol=tol, atol=tol):
             break
         G = G_new
-    F_SCAT = G / AB
+    F_SCAT = G / Alb
     return F_SCAT
 
 def compute_multiple_scattered_sunlight_gs(
-    AB, F_sun, illum_frac, sun_cosines, view_matrix, max_iter=100, tol=1e-6
+    Alb, F_sun, illum_frac, sun_cosines, view_matrix, max_iter=100, tol=1e-6
 ):
     N = len(illum_frac)
-    G = AB * F_sun * illum_frac * sun_cosines  # Initial guess
+    G = Alb * F_sun * illum_frac * sun_cosines  # Initial guess
     #Gauss-Seidel, as in Rozitis and Green 2011. Result is within
     for iteration in range(max_iter):
         converged = True
         for i in range(N):
             beforesum = np.dot(view_matrix[i, :i], G[:i]) if i > 0 else 0.0
             aftersum = np.dot(view_matrix[i, i+1:], G[i+1:]) if i < N-1 else 0.0
-            newval = AB * (F_sun * illum_frac[i] * sun_cosines[i] + beforesum + aftersum)
+            newval = Alb * (F_sun * illum_frac[i] * sun_cosines[i] + beforesum + aftersum)
             if abs(newval - G[i]) > tol:
                 converged = False
             G[i] = newval
         if converged:
             break
-    F_SCAT = G / AB
+    F_SCAT = G / Alb
     return F_SCAT
 
 

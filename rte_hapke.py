@@ -38,94 +38,75 @@ class RadiativeTransfer:
 
         # Previous solutions
         n = grid.nlay_dust
-        self.phi_vis_prev   = np.zeros(n)
         self.dphi_vis_prev  = np.zeros(n)
-        self.phi_therm_prev = np.zeros(n)
         self.dphi_therm_prev= np.zeros(n)
 
-    def solve_visible(self, T, mu, F):
+    def solve_visible(self,phi_vis_prev, T, mu, F, Q_vis):
         #Hapke visible 2-stream RTE solver
         x = self.grid.x_RTE
-        if self.cfg.custom_bvp:
-            u0 = self.phi_vis_prev.copy()
-            self.phi_vis_prev = solve_bvp_vis(
-                x, self._vis_fun, u0,
-                self.J_vis_ab, self.A_bvp, self.h0, self.hN, T,
-                tol=self.cfg.bvp_tol, max_iter=self.cfg.bvp_max_iter
-            )
-        else:
-            sol = solve_bvp(self._vis_fun, self._vis_bc, x,
-                            np.vstack((self.phi_vis_prev, self.dphi_vis_prev)), tol=self.cfg.bvp_tol)
-            y = sol.sol(x)
-            self.phi_vis_prev, self.dphi_vis_prev = y[0], y[1]
-        return self.phi_vis_prev
+        phi_vis_new = solve_bvp_vis(
+            x, self._vis_fun, phi_vis_prev,
+            self.J_vis_ab, self.A_bvp, self.h0, self.hN, Q_vis, T,
+            tol=self.cfg.bvp_tol, max_iter=self.cfg.bvp_max_iter
+        )
+        return phi_vis_new
 
-    def solve_thermal(self, T, mu, F):
+    def solve_thermal(self,phi_therm_prev, T, mu, F, Q_therm):
         #Hapke thermal 2-stream RTE solver
         x = self.grid.x_RTE
-        if self.cfg.custom_bvp:
-            u0 = self.phi_therm_prev.copy()
-            if self.cfg.single_layer:
-                # Use Dirichlet boundary condition for single-layer. Heat flux is balanced at bottom boundary. 
-                D = self.cfg.sigma/np.pi * T[-1]**4
-            else:
-                #Upstream value for lower boundary solver is defined by thermal emission from the substrate. 
-                D = self.cfg.sigma/np.pi * T[self.grid.nlay_dust]**4
-                #T_interface = calculate_interface_T(T, self.grid.nlay_dust, self.grid.alpha, self.grid.beta)
-                #D = self.cfg.sigma/np.pi * T_interface**4
-            self.phi_therm_prev = solve_bvp_therm(
-                x, self._therm_fun, u0,
-                self.J_therm_ab, self.A_bvp,
-                self.h0, self.hN,D,T,self.cfg.single_layer,
-                tol=self.cfg.bvp_tol, max_iter=self.cfg.bvp_max_iter
-            )
+        if self.cfg.single_layer:
+            # Use Dirichlet boundary condition for single-layer. Heat flux is balanced at bottom boundary. 
+            D = self.cfg.sigma/np.pi * T[-1]**4
         else:
-            #This code probably doesn't work anymore but is left here for reference. 
-            ode = lambda xx, C: self._therm_fun(xx, C, T)
-            bc  = lambda Ca, Cb: self._therm_bc(Ca, Cb, T)
-            sol = solve_bvp(ode, bc, x,
-                            np.vstack((self.phi_therm_prev, self.dphi_therm_prev)), tol=self.cfg.bvp_tol)
-            y = sol.sol(x)
-            self.phi_therm_prev, self.dphi_therm_prev = y[0], y[1]
-        return self.phi_therm_prev
+            #Upstream value for lower boundary solver is defined by thermal emission from the substrate. 
+            #D = self.cfg.sigma/np.pi * T[self.grid.nlay_dust]**4
+            T_interface = calculate_interface_T(T, self.grid.nlay_dust, self.grid.alpha, self.grid.beta)
+            D = self.cfg.sigma/np.pi * T_interface**4
+        phi_therm_new = solve_bvp_therm(
+            x, self._therm_fun, phi_therm_prev,
+            self.J_therm_ab, self.A_bvp,
+            self.h0, self.hN,D,Q_therm,T,self.cfg.single_layer,
+            tol=self.cfg.bvp_tol, max_iter=self.cfg.bvp_max_iter
+        )
+        return phi_therm_new
 
-    def compute_source(self, T, mu, F):
+    def compute_source(self, T,phi_vis_prev,phi_therm_prev,mu, F, Q_therm=0.0, Q_vis=0.0):
         # Using Hapke RTE model. 
         self.mu = mu
         self.F = F
-        if F > 0:
-            phi_vis = self.solve_visible(T, mu, F)
+        if F > 0 or Q_vis > 1.0e-3:
+            phi_vis_new = self.solve_visible(phi_vis_prev,T, mu, F, Q_vis)
+            F2 = F*(mu>0.001)
             source_vis = self.cfg.eta * self.cfg.gamma_vis**2 * self.cfg.q * (
-                self.cfg.J * F * np.exp(-self.grid.x_RTE / mu) + 4*np.pi*phi_vis)
+                self.cfg.J * F2 * np.exp(-self.grid.x_RTE / mu) + 4*np.pi*phi_vis_new)
         else:
             source_vis = np.zeros(len(self.grid.x_RTE))
-            self.phi_vis_prev = np.zeros(len(self.grid.x_RTE))
+            phi_vis_new = np.zeros(len(self.grid.x_RTE))
             
-        phi_therm = self.solve_thermal(T, mu, F)
+        phi_therm_new = self.solve_thermal(phi_therm_prev,T, mu, F, Q_therm)
         if self.cfg.single_layer:
-            _, d2 = self._therm_fun(self.grid.x_RTE, (phi_therm, 0.0), T[1:-1])
+            d2 = self._therm_fun(self.grid.x_RTE, phi_therm_new, T[1:-1])
         else:
-            _, d2 = self._therm_fun(self.grid.x_RTE, (phi_therm, 0.0), T[1:self.grid.nlay_dust+1])
+            d2 = self._therm_fun(self.grid.x_RTE, phi_therm_new, T[1:self.grid.nlay_dust+1])
         source_therm = np.pi * self.cfg.q * d2
 
         if not self.cfg.single_layer:
             #Calculate boundary fluxes. 
-            #T_interface = calculate_interface_T(T, self.grid.nlay_dust, self.grid.alpha, self.grid.beta)
-            #therm_up = self.cfg.sigma / np.pi * T_interface**4
-            therm_up = self.cfg.sigma/np.pi * T[self.grid.nlay_dust]**4
+            T_interface = calculate_interface_T(T, self.grid.nlay_dust, self.grid.alpha, self.grid.beta)
+            therm_up = self.cfg.sigma / np.pi * T_interface**4
+            #therm_up = self.cfg.sigma/np.pi * T[self.grid.nlay_dust]**4
             #downstream visible at bottom boundary is equal to phi_vis*2
-            vis_down = 2.0 * self.phi_vis_prev[-1]
+            vis_down = 2.0 * phi_vis_new[-1]
             #downstream thermal at bottom boundary is therm_up + therm_down = phi_therm*2
-            therm_down = 2.0 * self.phi_therm_prev[-1] - therm_up
-            # Note that the extra factor of 2 on vis_down in the equation below was determined via direct comparison with DISORT.
+            therm_down = 2.0 * phi_therm_new[-1] - therm_up
+            # Vis diffuse down seems to consitently underestimate disort predictions by about 11–15%. Cause unclear. 
             # The equivalency of the other terms (direct beam, diffuse therm_down, and therm_up) were also verified against DISORT. 
             boundary_flux = ( therm_down*np.pi - therm_up*np.pi)
             if F > 0:
-                boundary_flux += self.F*self.cfg.J * np.exp(-self.grid.x_RTE[-1]/self.mu) + vis_down*2
-            if(np.isnan(boundary_flux)):
-                print('hi')
+                boundary_flux += self.F*self.cfg.J * np.exp(-self.grid.x_boundaries[-1]/self.mu)
+            if F > 0 or Q_vis > 1.0e-3:
+                boundary_flux += vis_down*np.pi
 
-        
         source = np.zeros(self.grid.x_num)
         if self.cfg.single_layer:
             source[1:-1] = source_vis + source_therm
@@ -134,38 +115,23 @@ class RadiativeTransfer:
             source[1:self.grid.nlay_dust+1] = source_vis + source_therm
             source *= self.grid.K
             source[self.grid.nlay_dust+1] = boundary_flux #store the boundary flux term here. 
-        return source
+        return source, phi_vis_new,phi_therm_new
 
 
     # Internal ODE functions
-    def _vis_fun(self, x, C, T):
+    def _vis_fun(self, x, phi, T):
         #Hapke visible RTE equation
-        phi, dphidx = C
-        source = self.cfg.J * self.cfg.ssalb_vis * np.exp(-x/self.mu) / (4*np.pi)
+        if(self.mu>0.001):
+            source = self.cfg.J * self.cfg.ssalb_vis * np.exp(-x/self.mu) / (4*np.pi)
+        else:
+            source = 0.0
         d2 = 4.0*(self.cfg.gamma_vis**2 * phi - source)
-        return [dphidx, d2]
+        return d2
 
-    def _vis_bc(self, Ca, Cb):
-        #Boundary conditions for Hapke vis RTE, only used if using scipy.solve_bvp
-        phi_a, dphidx_a = Ca
-        phi_b, dphidx_b = Cb
-        return np.array([phi_a - 0.5*dphidx_a, phi_b + 0.5*dphidx_b])
-
-    def _therm_fun(self, x, C, T):
+    def _therm_fun(self, x, phi, T):
         #Hapke thermal RTE equation
-        phi, dphidx = C
-        #temp = np.interp(x, self.grid.x_orig, T)
-        #temp = T[1:self.grid.nlay_dust+1]
         d2 = 4.0*(self.cfg.gamma_therm**2)*(phi - (1/np.pi)*self.cfg.sigma*T**4)
-        return [dphidx, d2]
-
-    def _therm_bc(self, Ca, Cb, T):
-        #Boundary conditions for Hapke thermal RTE, only used if using scipy.solve_bvp
-        phi_a, dphidx_a = Ca
-        phi_b, dphidx_b = Cb
-        top = phi_a - 0.5*dphidx_a
-        bottom = phi_b - (self.cfg.sigma/np.pi)*T[self.grid.nlay_dust]**4 + self.phi_vis_prev[-1]
-        return np.array([top, bottom])
+        return d2
 
 def planck_wn_integrated(wn_edges, T):
     """

@@ -175,7 +175,7 @@ def emissionT(T,tau_edges,T_interface,mu=1.0):
 	T_calc = 0.0
 	wt_calc = 0.0
 	for i in np.arange(len(T)):
-		T_calc += (T[i]**4.0)*(np.exp(-tau_edges[i]/mu) - np.exp(-tau_edges[i+1]))
+		T_calc += (T[i]**4.0)*(np.exp(-tau_edges[i]/mu) - np.exp(-tau_edges[i+1]/mu))
 	T_calc += T_interface**4. * np.exp(-tau_edges[-1]/mu)
 	return(T_calc**0.25)
 

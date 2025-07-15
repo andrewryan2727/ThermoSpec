@@ -128,6 +128,10 @@ def find_best_fit_k_dust(modelT, single_layer_lookup, temps_key='T_surf', start_
     avg = (max_T_k + min_T_k)/2.0
     min_bound = max(min(k_dust_values),avg-1.)
     max_bound = min(max(k_dust_values),avg+1.)
+    if min_bound < min(k_dust_values) : min_bound = min(k_dust_values)
+    if min_bound > max(k_dust_values) : min_bound = max(k_dust_values) - 1
+    if max_bound > max(k_dust_values) : max_bound = max(k_dust_values)
+    if max_bound < min(k_dust_values) : max_bound = min(k_dust_values) + 1
     if(min_bound >= max_bound):
         min_bound = max_bound-1.0
     
@@ -173,11 +177,13 @@ def find_best_fit_k_dust(modelT, single_layer_lookup, temps_key='T_surf', start_
 
 def emissionT(T,tau_edges,T_interface,mu=1.0):
 	T_calc = 0.0
-	wt_calc = 0.0
 	for i in np.arange(len(T)):
-		T_calc += (T[i]**4.0)*(np.exp(-tau_edges[i]/mu) - np.exp(-tau_edges[i+1]))
+		T_calc += (T[i]**4.0)*(np.exp(-tau_edges[i]/mu) - np.exp(-tau_edges[i+1]/mu))
 	T_calc += T_interface**4. * np.exp(-tau_edges[-1]/mu)
 	return(T_calc**0.25)
+
+def calculate_interface_T(T,i,alpha,beta):
+    return((alpha*T[i] + beta*T[i+1])/(alpha + beta))
 
 def analyze_heliocentric_distance(R_values, k_dust_values=None, lut_temps_key=None, model_temps_key=None):
     """Analyze equivalent single-layer k_dust for different heliocentric distances.
@@ -198,7 +204,7 @@ def analyze_heliocentric_distance(R_values, k_dust_values=None, lut_temps_key=No
     # Configure RTE modes based on temperature types
     if model_temps_key == 'emissT':
         target_cfg.use_RTE = True
-        target_cfg.RTE_solver = 'hapke'
+        target_cfg.RTE_solver = 'disort'
         target_cfg.multi_wave = False
     elif model_temps_key == 'T_surf':
         target_cfg.use_RTE = False
@@ -209,7 +215,7 @@ def analyze_heliocentric_distance(R_values, k_dust_values=None, lut_temps_key=No
 
     if lut_temps_key == 'emissT':
         ref_cfg.use_RTE = True
-        ref_cfg.RTE_solver = 'hapke'
+        ref_cfg.RTE_solver = 'disort'
         ref_cfg.multi_wave = False
     elif lut_temps_key == 'T_surf':
         ref_cfg.use_RTE = False
@@ -219,28 +225,49 @@ def analyze_heliocentric_distance(R_values, k_dust_values=None, lut_temps_key=No
         lut_temps_key = model_temps_key
 
     # Basic configuration
-    target_cfg.single_layer = True
-    target_cfg.ndays = 5
-    target_cfg.dust_thickness = 1.0  # m, Default thickness for single-layer model
-    target_cfg.rho_dust= 600.0
+    # target_cfg.single_layer = True
+    # target_cfg.ndays = 4
+    # target_cfg.dust_thickness = 1.0  # m, Default thickness for single-layer model
+    # target_cfg.rho_dust= 800.0
+    # target_cfg.cp_dust = 700.0
+    # target_cfg.k_dust = 5.5e-4
+    # target_cfg.Et = 5000.0 #1 mm particles, fill factor of 0.3
+    # target_cfg.last_day = True
+    # target_cfg.ssalb_vis = 0.06
+    # target_cfg.gamma_therm = 0.95
+    # target_cfg.minsteps = 10000
+    # target_cfg.latitude = np.radians(0.0) 
+
+    #Two layer option. 
+    target_cfg.single_layer = False
+    target_cfg.ndays = 4
+    target_cfg.dust_thickness = 0.02  # m, Default thickness for single-layer model
+    target_cfg.rock_thickness = 1.0
+    target_cfg.rho_dust= 366.0
     target_cfg.cp_dust = 700.0
     target_cfg.k_dust = 5.5e-4
-    target_cfg.Et = 90.0 #1 mm particles, fill factor of 0.3
+    target_cfg.rho_rock = 2000.0
+    target_cfg.cp_rock = 700.0
+    target_cfg.k_rock = 1.0
+    target_cfg.R_base = 0.04
+    target_cfg.Et = 100.0 
     target_cfg.last_day = True
     target_cfg.ssalb_vis = 0.06
     target_cfg.gamma_therm = 0.95
+    target_cfg.minsteps = 20000
+    target_cfg.latitude = np.radians(0.0) 
 
-    target_cfg.latitude = np.radians(0.0)
-    
     ref_cfg.single_layer = True
     ref_cfg.ndays = target_cfg.ndays
     ref_cfg.dust_thickness = 1.0  # m, Default thickness for single-layer model
     ref_cfg.k_dust_auto = False  # Use fixed k_dust values
-    ref_cfg.rho_dust = target_cfg.rho_dust  # Use same density as two-layer model
+    ref_cfg.rho_dust = target_cfg.rho_rock  # Use same density as two-layer model
     ref_cfg.cp_dust = target_cfg.cp_dust  # Use same specific heat as two-layer model
     ref_cfg.last_day = True
     ref_cfg.latitude = target_cfg.latitude
     ref_cfg.albedo = 0.04
+    ref_cfg.em = 1.0
+    ref_cfg.minsteps = 10000
 
     results = {}
     import matplotlib.pyplot as plt
@@ -250,9 +277,6 @@ def analyze_heliocentric_distance(R_values, k_dust_values=None, lut_temps_key=No
         fig = plt.figure(figsize=(15, 10))
         for i, R in enumerate(R_values):
             print(f"Processing heliocentric distance: {R:.2f} AU")
-
-
-
             # Build reference LUT for this R (use_RTE=False)
             ref_cfg.R = R
             ref_cfg.use_RTE = False
@@ -311,6 +335,7 @@ def analyze_heliocentric_distance(R_values, k_dust_values=None, lut_temps_key=No
             })
 
             # Run target model (use_RTE=True)
+            print(f"Main model run for heliocentric distance: {R:.2f} AU")
             target_cfg.R = R
             target_cfg.T_bottom = ref_cfg.T_bottom
             target_cfg.__post_init__()
@@ -326,7 +351,11 @@ def analyze_heliocentric_distance(R_values, k_dust_values=None, lut_temps_key=No
                 modelT = np.zeros(n_times)
                 for j in range(n_times):
                     T_profile = T_out[1:sim.grid.nlay_dust+1, j]
-                    modelT[j] = emissionT(T_profile, sim.grid.x_boundaries,0,mu=np.cos(target_cfg.latitude))
+                    if(not target_cfg.single_layer):
+                        T_interface = calculate_interface_T(T_out[:,j], sim.grid.nlay_dust, sim.grid.alpha, sim.grid.beta)
+                    else:
+                        T_interface =0 
+                    modelT[j] = emissionT(T_profile, sim.grid.x_boundaries,T_interface,mu=np.cos(target_cfg.latitude))
             else:
                 modelT = T_surf.copy()
 
