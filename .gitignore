@@ -2068,7 +2068,3 @@ DustThicknessSpectraPlots/emissivity_spectrum_3.00e-05m.png
 DustThicknessSpectraPlots/emissivity_spectrum_4.00e-05m.png
 DustThicknessSpectraPlots/emissivity_spectrum_5.00e-05m.png
 DustThicknessSpectraPlots/emissivity_spectrum_5.00e-06m.png
-T_dependent_analysis.py
-rte.py
-pydisort_test.py
-analysis.py
