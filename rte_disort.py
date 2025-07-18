@@ -4,15 +4,17 @@ import torch
 torch.set_default_dtype(torch.float64)
 from config import SimulationConfig
 from grid import LayerGrid
+from scipy.interpolate import interpn
 
 
 class DisortRTESolver:
-    def __init__(self, config: SimulationConfig, grid: LayerGrid, output_radiance=False, uniform_props=False,planck=True):
+    def __init__(self, config: SimulationConfig, grid: LayerGrid, n_cols = 1, output_radiance=False, uniform_props=False,planck=True):
         self.cfg = config
         self.grid = grid
         self.output_radiance = output_radiance
         self.uniform_props = uniform_props
         self.planck = planck
+        self.n_cols = n_cols
         #For multi-wavelength cases, load optical and solar constants from files
         if(self.cfg.multi_wave):
             self._load_constants()
@@ -25,6 +27,20 @@ class DisortRTESolver:
             self.prop = self._setup_optical_properties() 
         self.op = self._setup_disort_options() #Initialize disort options
         self.ds = Disort(self.op) #initialize disort
+        if(self.cfg.multi_wave):
+            nwave = len(self.wavenumbers)
+        else:
+            nwave = 1
+        #Initialize boundary condition arrays.
+        self.nwave = nwave 
+        self.umu0 = torch.zeros(n_cols)
+        self.phi0 = torch.zeros(n_cols) #Leaving at zero for now. No changes later. 
+        self.fbeam = torch.zeros((nwave,n_cols))
+        self.albedo = torch.zeros((nwave,n_cols))
+        self.fisot = torch.zeros((nwave,n_cols))
+        self.temis = torch.ones((nwave,n_cols)) #Top emissivity (space). Stays at 1. 
+        self.btemp = torch.zeros(n_cols)
+        self.ttemp  = torch.zeros(n_cols) #Space temperature. Stays at 0. 
 
     def _load_constants(self):
         #self.wavenumbers, self.ssalb_array, self.Cext_array, self.Csca_array, self.Cabs_array, self.alpha1_array = load_mie_folder(self.cfg.folder,self.config.nmom)
@@ -53,6 +69,8 @@ class DisortRTESolver:
         self.emiss_base = emiss_spec[:,1]
         #Determine TIR wavenumber range for uniform properties case
         if(self.uniform_props):
+            #Set wavenumber range for averaging TIR optical properties for making a smooth planck function. 
+            #Used only for producing final emissivity spectra. I.e., the spectra from other runs are divided by this smooth planck function. 
             wn_min = 100.0
             wn_max = 2000.0
             self.wn_min = np.argmin(np.abs(self.wavenumbers - wn_min))
@@ -62,6 +80,7 @@ class DisortRTESolver:
     def _setup_optical_properties(self):
         #Set up optical properties for simple two-wave disort case (vis and thermal)
         n_layers = len(self.grid.x_RTE)
+        prop = torch.zeros((1, self.n_cols, n_layers, 2 + self.cfg.nmom), dtype=torch.float64)
 
         tau_boundaries = self.grid.x_boundaries #tau at boundaries of each layer, convert from global Et to wavelength-specific Et.  
         if not self.planck: tau_boundaries *= self.cfg.eta #Convert tau vaues using visible extinction coefficient ratio. 
@@ -79,13 +98,12 @@ class DisortRTESolver:
             [torch.full((n_layers,), moms[i]) for i in range(self.cfg.nmom)],
             dim=-1
         )
-        optical_props = torch.cat([
-            tau_layer.unsqueeze(-1),
-            ssa_layer.unsqueeze(-1),
-            moments
-        ], dim=-1)
-        return optical_props.unsqueeze(0).unsqueeze(0)
-    
+        prop[0, :, :, 0] = tau_layer
+        prop[0, :, :, 1] = ssa_layer
+        prop[0, :, :, 2:] = moments
+        return prop
+
+
     def _setup_optical_properties_advanced(self):
         """Set up optical properties for DISORT
            Handles wavelength-dependent and/or depth-dependent scenarios
@@ -93,7 +111,7 @@ class DisortRTESolver:
         n_layers = len(self.grid.x_RTE) 
         n_waves = len(self.wavenumbers) if self.cfg.multi_wave else 1
         n_mom = self.cfg.nmom 
-        n_cols = 1 #number of columns. Always 1 unless we add variations in the future for different properties but at the same wavelength. 
+        n_cols = self.n_cols #number of columns. Always 1 unless we add variations in the future for different properties but at the same wavelength. 
 
         #initialize properties tensor. Last dimension is tau + ss_albedo + scattering moments
         prop = torch.zeros((n_waves, n_cols, n_layers, 2 + n_mom), dtype=torch.float64)
@@ -132,7 +150,7 @@ class DisortRTESolver:
                     Et = n_p * self.Cext_array[i_wave]*1e-12 #extinction coefficient at this wavelength, converting Cext from µm^2 to m^2 in the process. 
                     if(self.uniform_props):
                         Et = n_p * np.mean(self.Cext_array[self.wn_min:self.wn_max])*1e-12
-                    Et = Et*0.0 + 1000.0 #manual override to fixed value for testing 
+                    Et = Et*0.0 + 220.0 #manual override to fixed value for testing 
                     tau_boundaries = Et*self.grid.x_boundaries/self.cfg.Et #tau at boundaries of each layer, convert from global Et to wavelength-specific Et.  
                     dtau = tau_boundaries[1:] - tau_boundaries[:-1] #tau thickness of each layer
                     tau_layer = torch.tensor(dtau,dtype=torch.float64)
@@ -143,9 +161,9 @@ class DisortRTESolver:
                     if(self.uniform_props):
                         ssalb_val = np.mean(self.ssalb_array[self.wn_min:self.wn_max])
                     if self.wavenumbers[i_wave] >3330.0: 
-                        ssalb_val = ssalb_val*0.0 + 0.7 #manual override to fixed value for testing VISIBLE. 
+                        ssalb_val = ssalb_val*0.0 + 0.5 #manual override to fixed value for testing VISIBLE. 
                     else:
-                        ssalb_val = ssalb_val*0.0 #manual override for fixed value testing THERMAL
+                        ssalb_val = ssalb_val*0.0 + 0.1 #manual override for fixed value testing THERMAL
                     ssa_layer = torch.full([n_layers], ssalb_val,dtype=torch.float64)
                     g_val = self.g_array[i_wave]
                     if(self.cfg.force_vis_disort and self.wavenumbers[i_wave] >3330.0):
@@ -168,13 +186,11 @@ class DisortRTESolver:
                         dim=-1
                     )
             #Populate properties tensor
-            prop[i_wave, 0, :, 0] = tau_layer
-            prop[i_wave, 0, :, 1] = ssa_layer
-            prop[i_wave, 0, :, 2:] = moments
+            prop[i_wave, :, :, 0] = tau_layer
+            prop[i_wave, :, :, 1] = ssa_layer
+            prop[i_wave, :, :, 2:] = moments
 
         return prop
-
-
 
     def _setup_disort_options(self):
         """Configure DISORT options"""
@@ -210,6 +226,7 @@ class DisortRTESolver:
             op.wave_upper([10000]) #1 µm
         n_waves = len(self.wavenumbers) if self.cfg.multi_wave else 1
         op.nwave(n_waves)
+        op.ncol(self.n_cols)
         op.ds().nlyr = len(self.grid.x_RTE)
 
         return op
@@ -230,59 +247,117 @@ class DisortRTESolver:
 
     def disort_run(self,  T, mu, F , Q=None):
         #Solve RTE using DISORT for both visible and thermal bands.
+        #mu, F, and Q should all either be supplied as scalars or as arrays with length=n_cols
 
-        if mu<=0: F = 0
+        #Account for some crater shadow cases where the sun is up but the facet is not illuminated. 
+        F *= mu > 0.001
+
+        #Initialization state and dimensions of boundary condition arrays. 
+        # umu0 = torch.zeros(n_cols)
+        # phi0 = torch.zeros(n_cols)
+        # fbeam = torch.zeros((nwave,n_cols))
+        # albedo = torch.zeros((nwave,n_cols))
+        # fisot = torch.zeros((nwave,n_cols))
+        # temis = torch.ones((nwave,n_cols)) #Top emissivity (space). Stays at 1. 
+        # btemp = torch.zeros(n_cols)
+        # ttemp  = torch.zeros(n_cols)
 
         if(self.cfg.multi_wave):
-            fbeam = torch.tensor(self.solar*F).unsqueeze(1) #Solar flux integrated within each wavenumber band. 
-            temis = torch.full([len(self.wavenumbers)],1.0).unsqueeze(1)
-            if Q==None: 
-                fisot = torch.tensor(np.zeros_like(self.wavenumbers)).unsqueeze(1)
+            #fbeam = torch.tensor(self.solar*F).unsqueeze(1) #Solar flux integrated within each wavenumber band. 
+            if self.n_cols==1:
+                self.fbeam[:] = torch.from_numpy(self.solar*F)[:,None]
             else:
+                self.fbeam[:] = torch.from_numpy(np.tile(self.solar[:,None],(1,self.n_cols))*np.tile(F,(self.nwave,1)))
+            #temis = torch.full([len(self.wavenumbers)],1.0).unsqueeze(1)
+            #if Q==None: 
+                #fisot = torch.tensor(np.zeros_like(self.wavenumbers)).unsqueeze(1)
+            if np.any(Q != None):
                 #fisot = torch.tensor(Q).unsqueeze(1)
                 #For now passing global value. TO DO: update to wavelength-dependent later.
-                fisot = torch.full([len(self.wavenumbers)],Q).unsqueeze(1) 
+                #fisot = torch.full([len(self.wavenumbers)],Q).unsqueeze(1)
+                #Not correct for multi-column data.
+                if self.n_cols==1: 
+                    #only works if Q array is size [n_waves]
+                    self.fisot[:] = torch.from_numpy(Q)[:,None]
+                else:
+                    self.fisot[:] = torch.from_numpy(Q.swapaxes(0,1))
             if(self.cfg.use_spec and not self.uniform_props):
-                albedo = torch.tensor(1.0 - self.emiss_base).unsqueeze(1) #Albedo spectrum for the bottom boundary.
+                #albedo = torch.tensor(1.0 - self.emiss_base).unsqueeze(1) #Albedo spectrum for the bottom boundary.
+                self.albedo[:] = torch.from_numpy(1.0 - self.emiss_base)[:,None] #emiss_base must have same dimensions as n_wave. 
             else:
-                albedo = torch.full([len(self.wavenumbers)],self.cfg.R_base).unsqueeze(1) 
+                #albedo = torch.full([len(self.wavenumbers)],self.cfg.R_base).unsqueeze(1) 
+                self.albedo.fill_(self.cfg.R_base)
         else:
+            #Set up basic two-wave boundary conditions. 
             if self.planck:
-                fbeam = torch.tensor([0.0]) #We're in the thermal two-wave case. No sunlight here. 
+                #fbeam = torch.tensor([0.0]) #We're in the thermal two-wave case. No sunlight here. 
+                self.fbeam.fill_(0.0)
             else:
-                fbeam = torch.tensor([self.cfg.J * F]) #Visible two-wave case. Broadband flux from solar constant.  
-            temis = torch.tensor([1.0])
-            if Q==None:
-                fisot = torch.tensor([0.0]) 
+                if(self.n_cols>1):
+                    self.fbeam[:]= torch.from_numpy(F*self.cfg.J)[None,:] #Visible two-wave case. Broadband flux from solar const. F must have dimension n_col. 
+                else:
+                    self.fbeam.fill_(F*self.cfg.J)
+            #temis = torch.tensor([1.0])
+            if np.any(Q==None):
+                self.fisot.fill_(0.0) 
             else:
-                fisot = torch.tensor([Q])
-            albedo = torch.tensor([self.cfg.R_base])
+                if(self.n_cols>1):
+                    self.fisot[:] = torch.from_numpy(Q)[None,:] #Q must have dimensions n_col
+                else:
+                    self.fisot.fill_(Q)
+            self.albedo.fill_(self.cfg.R_base)
 
         if(self.cfg.single_layer):
-            btemp = T[-1]
+            if(self.n_cols>1):
+                self.btemp[:] = torch.from_numpy(T[-1,:])
+                if(np.any(T[-1,:]<0)):
+                    print('hi')
+                    return
+            else:
+                self.btemp.fill_(T[-1])
         else:
             T_interface = calculate_interface_T(T, self.grid.nlay_dust, self.grid.alpha, self.grid.beta)
-            btemp = T_interface
+            if(self.n_cols>1):
+                self.btemp[:] = torch.from_numpy(T_interface)
+            else:
+                self.btemp.fill_(T_interface)
         
-        self.bc = {
-            "umu0": torch.tensor([mu]), #Cosine of solar incidence angle
-            "phi0": torch.tensor([0.0]), #Azimuth angle of solar incidence. 
-            "albedo": albedo, #Albedo of bottom boundary
-            "btemp": torch.tensor([btemp]), #Brightness temperature of bottom boundary. 
-            "ttemp": torch.tensor([0.0]), #Top boundary temperature (space)
-            "temis": temis, #Emissivity of top boundary (space)
-            "fisot": fisot, #Intensity of top-boundary isotropic illumination (W/m^2)
-            "fbeam": fbeam #Intensity of incidence parallel beam Solar flux (W/m^2)
+        if(self.n_cols>1):
+            self.umu0[:] = torch.from_numpy(mu)
+        else:
+            self.umu0[:] = mu
+
+        bc = {
+            "umu0": self.umu0, #Cosine of solar incidence angle
+            "phi0": self.phi0, #Azimuth angle of solar incidence. 
+            "albedo": self.albedo, #Albedo of bottom boundary
+            "btemp": self.btemp, #Brightness temperature of bottom boundary. 
+            "ttemp": self.ttemp, #Top boundary temperature (space)
+            "temis": self.temis, #Emissivity of top boundary (space)
+            "fisot": self.fisot, #Intensity of top-boundary isotropic illumination (W/m^2)
+            "fbeam": self.fbeam #Intensity of incidence parallel beam Solar flux (W/m^2)
         }
-        
+
         #Need to interpolate temperature field to be at boundaries of computational layers, rather than at the center.
-        #Assuming that the temperature grid is sufficiently dense to allow for a fast linear interpolation.  
-        T_interp = np.interp(self.grid.x_boundaries,self.grid.x_RTE,T[1:self.grid.nlay_dust+1])
-        self.T_tensor = torch.tensor(T_interp).unsqueeze(0)
+        #Assuming that the temperature grid is sufficiently dense to allow for a fast linear interpolation.
+        if self.n_cols==1:  
+            T_interp = np.interp(self.grid.x_boundaries,self.grid.x_RTE,T[1:self.grid.nlay_dust+1])
+            T_tensor = torch.tensor(T_interp).unsqueeze(0)
+        else:
+            #T_interp = interpn((self.grid.x_RTE,),T[1:self.grid.nlay_dust+1,:],self.grid.x_boundaries,bounds_error=False,fill_value=None)
+            #T_tensor = torch.tensor(T_interp).swapaxes(0,1)
+            T_interp = np.vstack([
+                np.interp(self.grid.x_boundaries, self.grid.x_RTE, T[1:self.grid.nlay_dust+1, col])
+                for col in range(self.n_cols)
+            ])
+            T_tensor = torch.tensor(T_interp)
 
         #Run disort. Result returns up and down total fluxes. 
-        result = self.ds.forward(self.prop,'', self.T_tensor, **self.bc)
-        fl_up = result[:,0,0,0] #total upwards diffuse flux from top layer, for rough surface scattering modeling. 
+        result = self.ds.forward(self.prop,'', T_tensor, **bc)
+        if(self.cfg.multi_wave):
+            fl_up = result[:,:,0,0].numpy() #total upwards diffuse flux from top layer, for rough surface scattering modeling. 
+        else:
+            fl_up = result[0,:,0,0].numpy()
         #result[nwave,ncol,ndepth,up or down]
 
         #DISORT outputs from the gather_flx() method are: 
@@ -301,26 +376,42 @@ class DisortRTESolver:
         #Q_rad = np.diff(F_net.numpy()) / self.grid.dtau
         if(self.output_radiance):
             #Just return the radiance as viewed by the observer, currently fixed at zenith. 
-            rad = self.ds.gather_rad() #rad[nwave,ncol,ndepth,n_obs_direction mu/phi]
-            return(rad[:,0,0,0,0])
+            rad = self.ds.gather_rad() #rad[nwave,ncol,ndepth,n_obs_direction mu, phi]
+            return(rad[:,:,0,0,0])
         else:
             #Get flux divergence. 
             flx = self.ds.gather_flx() #flx[nwave,ncol,ndepth,8 properties] See table above for list of properties. 
             if(self.cfg.multi_wave):
                 #Summation of values from different wavelength bins
-                flux_divergence = flx[:,0,:,3]
+                flux_divergence = flx[:,:,:,3]
                 Q_rad = torch.sum(flux_divergence,dim=0)
             else:
-                Q_rad = flx[0,0,:,3]
-            Q_rad_interp = np.interp(self.grid.x_RTE,self.grid.x_boundaries,Q_rad)
-            source = np.zeros(self.grid.x_num)
-            source[1:self.grid.nlay_dust+1] = Q_rad_interp
-            source_term = source * self.grid.K * self.cfg.q
-            if(not self.cfg.single_layer):
-                #emission = np.pi*np.sum(planck_wn_integrated(self.wn_bins,T_interface)*self.emiss_base)
-                #Radiative flux source term at the rock/dust boundary. They are not multipled by Kq because they are not volumetric. 
-                #Terms on right are down direct-beam flux + down diffuse flux - up diffuse flux. 
-                source_term[self.grid.nlay_dust+1] = torch.sum((flx[:,0,-1,0] + flx[:,0,-1,1] - flx[:,0,-1,2]),dim=0)
+                Q_rad = flx[0,:,:,3] #returns Qrad[ncol,ndepth_boundaries]
+            if(self.n_cols==1):
+                Q_rad_interp = np.interp(self.grid.x_RTE,self.grid.x_boundaries,Q_rad[0,:])
+                source = np.zeros(self.grid.x_num)
+                source[1:self.grid.nlay_dust+1] = Q_rad_interp
+                source_term = source * self.grid.K * self.cfg.q
+                if(not self.cfg.single_layer):
+                    #emission = np.pi*np.sum(planck_wn_integrated(self.wn_bins,T_interface)*self.emiss_base)
+                    #Radiative flux source term at the rock/dust boundary. They are not multipled by Kq because they are not volumetric. 
+                    #Terms on right are down direct-beam flux + down diffuse flux - up diffuse flux. 
+                    source_term[self.grid.nlay_dust+1] = torch.sum((flx[:,0,-1,0] + flx[:,0,-1,1] - flx[:,0,-1,2]),dim=0)
+            else:
+                #Multiple columns. Return source_term in format [n_colns, n_depth]
+                #Q_rad_interp = interpn((self.grid.x_boundaries,),Q_rad.numpy().swapaxes(0,1),self.grid.x_RTE,bounds_error=False,fill_value=None)
+                Q_rad_interp = np.vstack([
+                    np.interp(self.grid.x_RTE, self.grid.x_boundaries, Q_rad[col,:])
+                    for col in range(self.n_cols)
+                ])
+                source = np.zeros((self.n_cols,self.grid.x_num))
+                source[:,1:self.grid.nlay_dust+1] = Q_rad_interp
+                source_term = source * self.grid.K * self.cfg.q
+                if(not self.cfg.single_layer):
+                    #emission = np.pi*np.sum(planck_wn_integrated(self.wn_bins,T_interface)*self.emiss_base)
+                    #Radiative flux source term at the rock/dust boundary. They are not multipled by Kq because they are not volumetric. 
+                    #Terms on right are down direct-beam flux + down diffuse flux - up diffuse flux. 
+                    source_term[:,self.grid.nlay_dust+1] = torch.sum((flx[:,:,-1,0] + flx[:,:,-1,1] - flx[:,:,-1,2]),dim=0)
             return source_term, fl_up
 
 

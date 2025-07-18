@@ -117,48 +117,58 @@ class CraterRadiativeTransfer:
         self.selfheating = selfheating
         self.view_matrix = self.selfheating.as_view_matrix(len(self.mesh.normals))
 
-    def compute_fluxes(self, sun_vec, illuminated, T_surface, albedo, emissivity,solar_constant, multiple_scatter=True, max_iter=100, tol=1e-6):
+    def compute_fluxes(self, sun_vec, illuminated, therm_flux, albedo, emissivity,F_sun, n_waves=1,multiple_scatter=True, max_iter=100, tol=1e-6):
+        #therm_flux should be equivalent to emissivity*sigma*T**4 for broadband, or the appropriate narrowband integrated value. 
         n_facets = len(self.mesh.normals)
         areas = self.mesh.areas
         # Solar incidence angle
         sun_vec = sun_vec / np.linalg.norm(sun_vec)
         cosines = np.dot(self.mesh.normals, sun_vec)
         cosines[cosines < 0] = 0.0
+        cosines = np.tile(cosines[:,None],(1,n_waves))
+        illuminated = np.tile(illuminated[:,None],(1,n_waves))
+        albedo = np.tile(albedo,(n_facets,1))
 
-        if(sun_vec[2]>0.001):
+        if(np.any(illuminated>0)):
             # Direct solar absorption
-            Q_direct = np.zeros(n_facets)
-            mask = (illuminated > 0) & (cosines > 0)
-            Q_direct[mask] = (1 - albedo) * solar_constant * cosines[mask] * illuminated[mask]
+            Q_direct = np.zeros((n_facets,n_waves))
+            mask = (illuminated[:,0] > 0) & (cosines[:,0] > 0)
+            Q_direct[mask] = (1 - albedo[mask]) * F_sun * cosines[mask] * illuminated[mask]
 
             # Multiple scattered sunlight 
             if multiple_scatter:
-                F_sun = solar_constant
+                F_sun = F_sun
                 Q_scattered = compute_multiple_scattered_sunlight(
                     albedo, F_sun, illuminated, cosines, self.view_matrix,
                     max_iter=max_iter, tol=tol
                 )
             else:
                 # Single scattering only 
-                Q_scattered = np.zeros(n_facets)
+                Q_scattered = np.zeros((n_facets,n_waves))
                 for i in range(n_facets):
                     idxs = self.selfheating.indices[i]
                     vfs = self.selfheating.view_factors[i]
                     for j_idx, vf in zip(idxs, vfs):
                         if illuminated[j_idx] > 0 and cosines[j_idx] > 0:
-                            Q_scattered[i] += albedo * solar_constant * illuminated[j_idx]* cosines[j_idx] * vf
+                            Q_scattered[i] += albedo * F_sun * illuminated[j_idx]* cosines[j_idx] * vf
         else:
-            Q_scattered = np.zeros(n_facets)
-            Q_direct = np.zeros(n_facets)
+            Q_scattered =np.zeros((n_facets,n_waves))
+            Q_direct = np.zeros((n_facets,n_waves))
 
         # Self-heating (thermal IR)
-        Q_selfheat = np.zeros(n_facets)
+        Q_selfheat = np.zeros((n_facets,n_waves))
         for i in range(n_facets):
             idxs = self.selfheating.indices[i]
-            vfs = self.selfheating.view_factors[i]
-            Q_selfheat[i] = emissivity * sigma * np.sum((T_surface[list(idxs)] ** 4) * vfs)
-
-        return Q_direct, Q_scattered, Q_selfheat, cosines
+            if(n_waves==1):
+                vfs = self.selfheating.view_factors[i]
+            else:
+                vfs = self.selfheating.view_factors[i][:,None]
+            #Q_selfheat[i] = emissivity * sigma * np.sum((T_surface[list(idxs)] ** 4) * vfs)
+            Q_selfheat[i] = np.sum(therm_flux[list(idxs)] * vfs,axis=0)
+        if(n_waves==1):
+            return Q_direct[:,0], Q_scattered[:,0], Q_selfheat[:,0], cosines[:,0]
+        else:
+            return Q_direct, Q_scattered, Q_selfheat, cosines
 
 # ---------- Multiple Scattering (Rozitis & Green, Eq 18–20, Iterative) ----------
 
@@ -171,11 +181,12 @@ def compute_multiple_scattered_sunlight(
         G_new = np.zeros_like(G)
         for i in range(N):
             sum_vf = np.dot(view_matrix[i], G)
-            G_new[i] = Alb * (F_sun * illum_frac[i] * sun_cosines[i] + sum_vf)
+            G_new[i] = Alb[i] * (F_sun * illum_frac[i] * sun_cosines[i] + sum_vf)
         if np.allclose(G_new, G, rtol=tol, atol=tol):
             break
         G = G_new
-    F_SCAT = G / Alb
+    F_SCAT = G.copy() 
+    F_SCAT[Alb>0.0] /= Alb[Alb>0.0]
     return F_SCAT
 
 def compute_multiple_scattered_sunlight_gs(
@@ -195,7 +206,8 @@ def compute_multiple_scattered_sunlight_gs(
             G[i] = newval
         if converged:
             break
-    F_SCAT = G / Alb
+    F_SCAT = G.copy() 
+    F_SCAT[Alb>0.0] /= Alb[Alb>0.0]
     return F_SCAT
 
 

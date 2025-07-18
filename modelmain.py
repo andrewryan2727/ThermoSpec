@@ -32,14 +32,6 @@ class Simulator:
 		self.cfg = config or SimulationConfig()
 		# Build spatial grid and FD matrix
 		self.grid = LayerGrid(self.cfg)
-		# Initialize radiative-transfer solver
-		if(self.cfg.use_RTE and self.cfg.RTE_solver == 'hapke'):
-			self.rte_hapke  = RadiativeTransfer(self.cfg, self.grid)
-		if(self.cfg.use_RTE and self.cfg.RTE_solver == 'disort'):
-			self.rte_disort = DisortRTESolver(self.cfg, self.grid,planck=True) #Used for thermal only in two-wave scenario. Used for all wavelengths in multi-wave scenario. 
-			self.rte_disort_vis = DisortRTESolver(self.cfg, self.grid,planck=False) #Only used in two-wave scenario for the visible spectrum. Planck=False turns off thermal emission. 
-		# Precompute time arrays and insolation flags
-		self._setup_time_arrays()
 		#Initialize crater geometry files for roughness model
 		if self.cfg.crater:
 			from crater import CraterMesh, SelfHeatingList, ShadowTester, CraterRadiativeTransfer
@@ -49,6 +41,18 @@ class Simulator:
 			self.crater_shadowtester = ShadowTester(self.crater_mesh)
 			self.crater_radtrans = CraterRadiativeTransfer(
 				self.crater_mesh, self.crater_selfheating)
+		# Initialize radiative-transfer solver
+		if(self.cfg.use_RTE and self.cfg.RTE_solver == 'hapke'):
+			self.rte_hapke  = RadiativeTransfer(self.cfg, self.grid)
+		if(self.cfg.use_RTE and self.cfg.RTE_solver == 'disort'):
+			self.rte_disort = DisortRTESolver(self.cfg, self.grid,planck=True) #Used for thermal only in two-wave scenario. Used for all wavelengths in multi-wave scenario. 
+			self.rte_disort_vis = DisortRTESolver(self.cfg, self.grid,planck=False) #Only used in two-wave scenario for the visible spectrum. Planck=False turns off thermal emission. 
+			if self.cfg.crater:
+				#Set up multi-column pydisort instances for running all crater facets in parallel. 
+				self.rte_disort_crater = DisortRTESolver(self.cfg, self.grid,n_cols=len(self.crater_mesh.normals), planck=True) 
+				self.rte_disort_crater_vis = DisortRTESolver(self.cfg, self.grid,n_cols=len(self.crater_mesh.normals),planck=False) 
+		# Precompute time arrays and insolation flags
+		self._setup_time_arrays()
 		# Initialize state variables and output arrays
 		self._init_state()
 
@@ -96,6 +100,7 @@ class Simulator:
 			self.T_crater_out = np.zeros((self.grid.x_num,n_facets, n_out))  # surface temp for each facet at each output time
 			self.T_surf_crater_out = np.zeros((n_facets,n_out))
 			self.F_crater_obs_out = np.zeros((n_facets, n_out))  # observed flux for each facet at each output time
+			self.n_facets = n_facets
 			if(self.cfg.RTE_solver=='hapke'):
 				self.phi_therm_prev_crater = np.zeros((self.grid.nlay_dust,n_facets))
 				self.phi_vis_prev_crater = np.zeros((self.grid.nlay_dust,n_facets))
@@ -251,8 +256,6 @@ class Simulator:
 		# Apply boundary conditions
 
 
-
-
 	def _make_outputs(self):
 		"""Interpolate integration results to desired output times, or just use final step for non-diurnal. Always compute DISORT radiance if needed. Also handles crater outputs."""
 		from scipy.interpolate import interp1d
@@ -365,7 +368,7 @@ class Simulator:
 					F = self.F_array[F_idx] #get nearest value for F. Don't want to interpolate and get a value that isn't 0 or 1. 
 				rad = self.rte_disort.disort_run(self.T_out[:,idx],self.mu_out[idx],F) #Returns thermal radiance for two-wave case, and entire radiance for multi-wave. 
 				if(self.cfg.multi_wave):
-					self.radiance_out[:,idx] = rad.numpy()
+					self.radiance_out[:,idx] = rad.numpy()[:,0]
 				else:
 					rad_vis = self.rte_disort_vis.disort_run(self.T_out[:,idx],self.mu_out[idx],F)
 					self.radiance_out[idx] = (rad+rad_vis).numpy()
@@ -373,7 +376,7 @@ class Simulator:
 					self.radiance_out_vis[idx] = rad_vis.numpy()
 				#Compute effective blackbodies that fit the results. 
 				if(self.cfg.multi_wave):
-					self.rad_T_out[idx], _, _, _ = fit_blackbody_wn_banded(self,wn_bounds, rad.numpy(),idx=idx)
+					self.rad_T_out[idx], _, _, _ = fit_blackbody_wn_banded(self,wn_bounds, rad.numpy()[:,0],idx=idx)
 				else:
 					#self.rad_T_out[idx] = fit_blackbody_broadband(self,rad.numpy(),idx=idx)
 					self.rad_T_out[idx] = (rad.numpy()*np.pi/self.cfg.sigma)**0.25
@@ -390,7 +393,7 @@ class Simulator:
 		check_convergence = not self.cfg.diurnal
 		n_check = getattr(self.cfg, 'steady_n_check', 200)  # How often to check
 		window = getattr(self.cfg, 'steady_window', 100)     # How far back to look for temperature history polynomial fit. 
-		tol = getattr(self.cfg, 'steady_tol', 0.2)         # Convergence threshold (K to extremum)
+		tol = getattr(self.cfg, 'steady_tol', 0.5)         # Convergence threshold (K to extremum)
 		converged = False
 
 		source_term = np.zeros(self.grid.x_num)
@@ -413,7 +416,7 @@ class Simulator:
 						source_term,_ = self.rte_disort.disort_run(self.T,self.mu,self.F)
 						if(not self.cfg.multi_wave):
 							#In the standard mode, run disort again for visible portion of the spectrum. 
-							source_term_vis,_ = self.rte_disort_vis.disort_run(self.T,self.mu,self.F)
+							source_term_vis,_ = self.rte_disort_vis.disort_run(self.T,self.mu,self.F,Q=300/np.pi)
 						else:
 							source_term_vis = np.zeros_like(source_term)
 					else:
@@ -437,42 +440,58 @@ class Simulator:
 			if self.cfg.crater:
 				#Pre-calculate the effective bond albedo and emissivity of the smooth surface for scattering calcs later. 
 				if j==0 and self.cfg.use_RTE:
-					#Estimate the effective bond albedo of the regolith surface. 
-					#Run the 1D model with the sun at 0 incidence angle to retrief the diffusve visible upwards flux. 
+					#Measure the effective bond albedo and emissivity of the regolith. 
+					#Run the 1D model with the sun at 0 incidence angle to retrief the diffusve visible upwards visible and thermal flux. 
+					F_sun = self.cfg.J
+					nwaves = 1
 					if(self.cfg.RTE_solver == 'hapke'):
 						_,phi_vis_prev,phi_therm_prev = self.rte_hapke.compute_source(self.T,self.phi_vis_prev,self.phi_therm_prev, 1.0, 1.0)
 						vis_flux_up = phi_vis_prev[0]*2*np.pi
 						albedo = vis_flux_up/self.cfg.J
 						therm_flux_up = phi_therm_prev[0]*2*np.pi
 						emissivity = therm_flux_up / (self.cfg.sigma*self.cfg.T_bottom**4.)
+						#Initialize initial upwards thermal flux for all crater facets used in self-heating calculations. 
+						self.flux_therm_crater = np.full(self.n_facets,therm_flux_up)
 					elif(self.cfg.RTE_solver == 'disort'):
 						_,flux_up_therm = self.rte_disort.disort_run(self.T,1.0,1.0)
 						_,flux_up_vis = self.rte_disort_vis.disort_run(self.T,1.0,1.0)
 						if self.cfg.multi_wave:
-							#TO DO: Need to shift these arrays to being wavelength-dependent. 
+							#Determine wavelength-dependent vis reflectance and thermal emissivity 
 							vis_range = self.rte_disort.wavenumbers>3333
 							therm_range = self.rte_disort.wavenumbers<=3333
-							fl_vis = np.array(flux_up_vis[vis_range]).sum()
-							albedo = fl_vis / np.sum(self.rte_disort.solar)
-							fl_therm = np.array(flux_up_therm[therm_range]).sum()
-							emissivity = np.array(fl_therm / (self.cfg.sigma*self.cfg.T_bottom**4.))
-							raise NotImplementedError('Multi-wave DISORT crater implementation not yet completed/tested. ')
+							nwaves = len(self.rte_disort.wavenumbers)
+							albedo = np.zeros_like(self.rte_disort.wavenumbers)
+							albedo[vis_range] = (flux_up_vis[vis_range,0] / self.rte_disort.solar[vis_range])
+							emissivity = np.zeros_like(self.rte_disort.wavenumbers)
+							wn_bounds = np.loadtxt(self.cfg.wn_bounds)[:sum(therm_range)+1]
+							planck_btemp = np.zeros(np.sum(therm_range))
+							for i in np.arange(np.sum(therm_range)):
+								planck_btemp[i] = planck_wn_integrated(wn_bounds[i:i+2], self.cfg.T_bottom)
+							emissivity[therm_range] = flux_up_therm[therm_range,0] / (planck_btemp*np.pi)
+							emiss_avg = np.average(emissivity[therm_range])
+							F_sun = np.loadtxt(self.cfg.solar_spectrum_file)[:,1]/self.cfg.R**2.
+							#Upward therma flux for self heating. Shape [nfacets,nwave]
+							self.flux_therm_crater = np.tile(flux_up_therm[:,0],(self.n_facets,1))
+							self.flux_therm_crater[:,vis_range] = 0.0 
 						else:
 							albedo = np.array(flux_up_vis) / self.cfg.J
 							emissivity = np.array(flux_up_therm)/(self.cfg.sigma*self.cfg.T_bottom**4.)
+							self.flux_up_therm = np.full(self.n_facets, flux_up_therm)
 					print("Crater effective albedo and emissivity: " + str(albedo) + " " + str(emissivity))
 					#Configure flux_up arrays for calculating brigthness temperature
 				elif j==0: 
 					#non-rte case, use user-provided bond abledo for scattering calcs. 
+					F_sun = self.cfg.J
+					nwaves = 1
 					albedo = self.cfg.albedo
 					emissivity = self.cfg.em
-
+					self.flux_up_therm = np.full(self.n_facets,emissivity*self.cfg.sigma*self.T[0]**4.)
 				if j > 0:
 					#sun vector (pointing towards sun)
 					sun_vec = np.array([self.sun_x[j], self.sun_y[j], self.sun_z[j]])
 					#Calculate which crater facets are illuminated by the sun.
 					if(self.F>0):
-						if j%self.cfg.illum_freq==0:
+						if j==1 or j%self.cfg.illum_freq==0:
 							self.illuminated = self.crater_shadowtester.illuminated_facets(sun_vec)
 					else:
 						self.illuminated = np.zeros_like(self.T_surf_crater)
@@ -481,45 +500,79 @@ class Simulator:
 					#TO DO: For multi-wave, we need to pass the solar spectrum for each band. 
 					# Likewise, albedo and brightness temperature for each band. 
 					Q_dir, Q_scat, Q_selfheat, cosines = self.crater_radtrans.compute_fluxes(
-						sun_vec, self.illuminated, self.T_surf_crater,albedo, emissivity, self.cfg.J,multiple_scatter=True
+						sun_vec, self.illuminated, self.flux_therm_crater,albedo, emissivity, F_sun,nwaves,multiple_scatter=True
 						)
 					if self.cfg.diurnal and j % max(100, self.t_num//20) == 0:
 						print(f"Q_dir, Q_scat, Q_selfheat {Q_dir[50]}/{Q_scat[50]}/{Q_selfheat[i]}")
 					#Q_dir is already multipled by 1-albedo, illum fraction, and the cosine of the incidence angle, so it is absorbed energy. 
 					#Q_scat is incident energy, so it is NOT multiplied by 1-albedo
 					#Q_selfheat is likewise not multplied by the absorptivity of the surface. 
-					for i in np.arange(len(self.T_surf_crater)):
-						if self.cfg.use_RTE:
-							#Calculate mu
-							if(self.cfg.RTE_solver == 'hapke'):
-								source_term, self.phi_vis_prev_crater[:,i], self.phi_therm_prev_crater[:,i] = self.rte_hapke.compute_source(self.T_crater[:,i], self.phi_vis_prev_crater[:,i],self.phi_therm_prev_crater[:,i],cosines[i], self.illuminated[i], Q_therm=Q_selfheat[i]/np.pi/2,Q_vis=Q_scat[i]/np.pi)
-							elif(self.cfg.RTE_solver == 'disort'):
-								if(self.cfg.multi_wave):
-									#Physics not yet properly implemented. Scattering and self-heating need to be calculated for each band. Otherwise we are blowing things up. 
-									source_term, flux_up = self.rte_disort.disort_run(self.T_crater[:,i],cosines[i],self.F, Q = Q_selfheat[i]/np.pi+Q_scat[i]/np.pi)
-									source_term_vis = np.zeros_like(source_term)
-									self.flux_therm_crater[i] = torch.sum(flux_up[therm_range])
-								else:
-									#In the standard two-wave mode, run disort again for thermal and visible portion of the spectrum. 
-									source_term, self.flux_therm_crater[i] = self.rte_disort.disort_run(self.T_crater[:,i],cosines[i],self.F, Q = Q_selfheat[i]/np.pi)
-									if(Q_scat[i]>1.0e-2):
-										#Passing illuminated fraction in place of F here to appropriated adjust the incident solar intensity. 
-										#Some facets aren't directly illuminated but see indirect scattered sunlight, so we run for those cases here too. 
-										source_term_vis,_ = self.rte_disort_vis.disort_run(self.T_crater[:,i],cosines[i],self.illuminated[i], Q = Q_scat[i]/np.pi)
-									else:
-										source_term_vis = 0.0
-						# Advance heat equation with solve_banded (must be looped)
-						self.T_crater[:,i] = self._fd1d_heat_implicit_diag(self.T_crater[:,i],source_term+source_term_vis)
+					#Both are divided by pi to convert to intesity, as needed for hapke and disort:
+					Q_scat /= np.pi
+					Q_selfheat /= np.pi
+					if self.cfg.use_RTE and self.cfg.RTE_solver == 'disort':
+						if(self.cfg.multi_wave):
+							source_term, flux_up = self.rte_disort_crater.disort_run(self.T_crater,cosines[:,0],self.illuminated, Q = Q_selfheat+Q_scat)
+							source_term_vis = np.zeros_like(source_term)
+							self.flux_therm_crater = flux_up.swapaxes(0,1)
+							self.flux_therm_crater[:,vis_range] = 0.0
+						else:
+							#In the standard two-wave mode, run disort again for thermal and visible portion of the spectrum. 
+							source_term, self.flux_therm_crater = self.rte_disort_crater.disort_run(self.T_crater,cosines*0.0,0.0, Q = Q_selfheat)
+							#plt.plot(source_term[0,:])
+							if(np.any(Q_scat>1.0e-2)):
+								#Passing illuminated fraction in place of F here to appropriated adjust the incident solar intensity. 
+								#Some facets aren't directly illuminated but see indirect scattered sunlight, so we run for those cases here too. 
+								source_term_vis,_ = self.rte_disort_crater_vis.disort_run(self.T_crater,cosines,self.illuminated, Q = Q_scat)
+								#plt.plot(source_term_vis[0,:])
+							else:
+								source_term_vis = np.zeros_like(source_term)
+						for i in np.arange(len(self.T_surf_crater)):
+							self.T_crater[:,i] = self._fd1d_heat_implicit_diag(self.T_crater[:,i],source_term[i]+source_term_vis[i])
+					else:
+						for i in np.arange(len(self.T_surf_crater)):
+							if self.cfg.use_RTE:
+								#Calculate mu
+								if(self.cfg.RTE_solver == 'hapke'):
+									source_term, self.phi_vis_prev_crater[:,i], self.phi_therm_prev_crater[:,i] = self.rte_hapke.compute_source(self.T_crater[:,i], self.phi_vis_prev_crater[:,i],self.phi_therm_prev_crater[:,i],cosines[i], self.illuminated[i], Q_therm=Q_selfheat[i],Q_vis=Q_scat[i])
+									#Calculate flux up from equation that phi = (up+down)/2, where down is the Q_therm from above. Multiply by pi as usual to convert from Hapke convention to flux in W/m2
+									self.flux_therm_crater[i] = (self.phi_therm_prev_crater[0,i]*2 - Q_selfheat[i])*np.pi
+								# elif(self.cfg.RTE_solver == 'disort'):
+								# 	#TO DO: pydisort can accept multiple sims as once as "columns." This should be tested for speed, rather than looping as we are doing here. 
+								# 	if(self.cfg.multi_wave):
+								# 		#Physics not yet properly implemented. Scattering and self-heating need to be calculated for each band. Otherwise we are blowing things up. 
+								# 		source_term, flux_up = self.rte_disort.disort_run(self.T_crater[:,i],cosines[i],self.F, Q = Q_selfheat[i]+Q_scat[i])
+								# 		source_term_vis = np.zeros_like(source_term)
+								# 		self.flux_therm_crater[i] = torch.sum(flux_up[therm_range])
+								# 	else:
+								# 		#In the standard two-wave mode, run disort again for thermal and visible portion of the spectrum. 
+								# 		source_term, self.flux_therm_crater[i] = self.rte_disort.disort_run(self.T_crater[:,i],cosines[i],self.F, Q = Q_selfheat[i])
+								# 		# if(i==1):
+								# 		# 	plt.plot(source_term)
+								# 		if(Q_scat[i]>1.0e-2):
+								# 			#Passing illuminated fraction in place of F here to appropriated adjust the incident solar intensity. 
+								# 			#Some facets aren't directly illuminated but see indirect scattered sunlight, so we run for those cases here too. 
+								# 			source_term_vis,_ = self.rte_disort_vis.disort_run(self.T_crater[:,i],cosines[i],self.illuminated[i], Q = Q_scat[i])
+								# 		else:
+								# 			source_term_vis = 0.0
+							# Advance heat equation with solve_banded (must be looped)
+							self.T_crater[:,i] = self._fd1d_heat_implicit_diag(self.T_crater[:,i],source_term+source_term_vis)
 					#Apply boundary conditions, which is vectorized and doesn't require a loop. 
-					self.T_crater, self.T_surf_crater = self._bc(self.T_crater, self.T_surf_crater,Q_dir+Q_scat*(1-albedo)+Q_selfheat*emissivity)
-					#If using RTE, calculate surface brightness temperatures for next step. 
+					self.T_crater, self.T_surf_crater = self._bc(self.T_crater, self.T_surf_crater,Q_dir+Q_scat*(1-albedo)*np.pi+Q_selfheat*emissivity*np.pi)
 					if self.cfg.use_RTE:
-						#Need to calculate T_surf_crater as a brightness temperature from radiance. 
+						#Calculate T_surf_crater as an effective brightness temperature from upwards flux for outputs. 
 						if(self.cfg.RTE_solver == 'hapke'):
-							therm_flux_up = self.phi_therm_prev_crater[0,:]*2*np.pi
-							self.T_surf_crater = (therm_flux_up/self.cfg.sigma/emissivity)**0.25							
-						elif(self.cfg.RTE_solver == 'disort'):
 							self.T_surf_crater = (self.flux_therm_crater/self.cfg.sigma/emissivity)**0.25
+							#self.T_surf_crater = emissionT(self.T_crater[1:self.grid.nlay_dust+1],self.grid.x_boundaries,0.0,1.0)
+						elif(self.cfg.RTE_solver == 'disort'):
+							if(self.cfg.multi_wave):
+								#Calculate the overall brightness temperature from the sum of all wavelengths. 
+								self.T_surf_crater = (np.sum(self.flux_therm_crater,axis=1)/self.cfg.sigma/emiss_avg)**0.25
+							else:
+								self.T_surf_crater = (self.flux_therm_crater/self.cfg.sigma/emissivity)**0.25
+					else:
+						#Non-RTE model, calculate upwards thermal emission for self-heating in next time step. 
+						self.flux_therm_crater = emissivity*self.cfg.sigma*self.T_surf_crater**4.
 				self.T_crater_history.append(self.T_crater.copy())
 				self.T_surf_crater_history.append(self.T_surf_crater.copy())
 
@@ -592,13 +645,15 @@ class Simulator:
 				F = self.F_array[F_idx] #get nearest value for F. Don't want to interpolate and get a value that isn't 0 or 1. 
 			rad = rte_disort.disort_run(self.T_out[:,idx],self.mu_out[idx],F)
 			if(self.cfg.multi_wave):
-				self.radiance_out_uniform[:,idx] = rad
+				self.radiance_out_uniform[:,idx] = rad[:,0]
 			else:
 				self.radiance_out_uniform[idx] = rad
 
 def emissionT(T,tau_edges,T_interface,mu):
-	T_calc = 0.0
-	wt_calc = 0.0
+	if(len(T.shape)>1):
+		T_calc = np.zeros(T.shape[1])
+	else:
+		T_calc = 0.0
 	for i in np.arange(len(T)):
 		T_calc += (T[i]**4.0)*(np.exp(-tau_edges[i]/mu) - np.exp(-tau_edges[i+1]/mu))
 	T_calc += T_interface**4. * np.exp(-tau_edges[-1]/mu)

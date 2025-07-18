@@ -64,12 +64,12 @@ class SimulationConfig:
 
     # Simulation flags and convergence settings
     use_RTE: bool = True             # use radiative transfer model, otherwise runs traditional thermal model. 
-    RTE_solver: str = 'disort'       # Options are 'disort' or 'hapke'
+    RTE_solver: str = 'hapke'       # Options are 'disort' or 'hapke'
     bottom_bc: str = 'neumann'       # bottom boundary condition choices: "neumann" (zero‐flux), "dirichlet" (fixed T_bottom)
     sun: bool = True                 # include solar input
-    diurnal: bool = False             # include diurnal variation. If false, model is steady-state. 
+    diurnal: bool = True             # include diurnal variation. If false, model is steady-state. 
     
-    steady_state_mu: float = np.cos(np.radians(60.0)) #Solar incidence angle for steady steate runs with the sun turned on. 
+    steady_state_mu: float = np.cos(np.radians(30.0)) #Solar incidence angle for steady steate runs with the sun turned on. 
 
     # Time-stepping parameters
     ndays: int = 1                   # total simulation days (diurnal cycles)
@@ -81,10 +81,10 @@ class SimulationConfig:
 
 
     # Advanced times stepping and numerical accuracy prameters
-    dtfac: float = 20.0               # Define time step as dt = dtfac*min(dx/K). Higher number increases speed at risk of reduced accuracy. Default=10
-    minsteps: int = 10000            # Minimum number of time steps per day. Used if auto_dt is True. Default=5000. Try setting to a higher number if you think your model is inaccurate.  
-    min_nlay_dust: int = 12         # Minimum number of grid points within dust column for two-layer scenario. Default=12. 
-    rock_lthick_fac: float = 0.2    # Factor by which to multiply auto-calculated rock layer thickness. This is used to ensure that the rock layer is not too thick compared to the dust layer. Default=0.25. 
+    dtfac: float = 10.0               # Define time step as dt = dtfac*min(dx/K). Higher number increases speed at risk of reduced accuracy. Default=10
+    minsteps: int = 5000             # Minimum number of time steps per day. Used if auto_dt is True. Default=5000. Try setting to a higher number if you think your model is inaccurate.  
+    min_nlay_dust: int = 12          # Minimum number of grid points within dust column for two-layer scenario. Default=12. 
+    rock_lthick_fac: float = 0.2     # Factor by which to multiply auto-calculated rock layer thickness. This is used to ensure that the rock layer is not too thick compared to the dust layer. Default=0.25. 
     dust_rte_max_lthick: float = 0.02  # Maximum first grid layer thickness for RTE model (in tau units, i.e., optical opacity). Default=0.025
 
 
