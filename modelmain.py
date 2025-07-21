@@ -41,6 +41,12 @@ class Simulator:
 			self.crater_shadowtester = ShadowTester(self.crater_mesh)
 			self.crater_radtrans = CraterRadiativeTransfer(
 				self.crater_mesh, self.crater_selfheating)
+			
+			# Initialize observer radiance calculator if enabled
+			if self.cfg.compute_observer_radiance:
+				from observer_radiance import ObserverRadianceCalculator
+				self.observer_radiance_calc = ObserverRadianceCalculator(
+					self.cfg, self.grid, self.cfg.observer_vectors)
 		# Initialize radiative-transfer solver
 		if(self.cfg.use_RTE and self.cfg.RTE_solver == 'hapke'):
 			self.rte_hapke  = RadiativeTransfer(self.cfg, self.grid)
@@ -101,86 +107,117 @@ class Simulator:
 			self.T_surf_crater_out = np.zeros((n_facets,n_out))
 			self.F_crater_obs_out = np.zeros((n_facets, n_out))  # observed flux for each facet at each output time
 			self.n_facets = n_facets
+			
+			# Initialize solar angle arrays for crater facets
+			self.mu_solar_facets = np.zeros(n_facets)
+			self.phi_solar_facets = np.zeros(n_facets)
+			
+			# Observer radiance arrays
+			if self.cfg.compute_observer_radiance:
+				n_observers = len(self.cfg.observer_vectors)
+				if self.cfg.use_RTE and self.cfg.RTE_solver == 'disort' and self.cfg.multi_wave:
+					# Multi-wave case: need to determine number of wavelengths
+					# This will be set later when DISORT is initialized
+					self.observer_radiance_out = None  # Will be initialized in _make_outputs
+				else:
+					# Two-wave or non-RTE case: single radiance value per observer
+					self.observer_radiance_out = np.zeros((n_observers, n_out))
 			if(self.cfg.RTE_solver=='hapke'):
 				self.phi_therm_prev_crater = np.zeros((self.grid.nlay_dust,n_facets))
 				self.phi_vis_prev_crater = np.zeros((self.grid.nlay_dust,n_facets))
 
 	def _setup_time_arrays(self):
-		"""Set up time arrays for integration and output."""
+		"""Set up time arrays for integration and output. Optimized for non-diurnal cases."""
 		P = self.cfg.P
 
-		# Set up integration time steps
-		if self.cfg.auto_dt:
-			self.t_num = self.grid.steps_per_day * self.cfg.ndays
-			self.t = np.arange(self.t_num) * self.grid.dt
+		if not self.cfg.diurnal:
+			# Non-diurnal: two time steps (j=0 for initialization, j=1+ for calculation)
+			# Use proper dt for numerical stability
+			if self.cfg.auto_dt:
+				initial_t_num = self.grid.steps_per_day * self.cfg.ndays
+				dt = self.grid.dt
+			else:
+				initial_t_num = self.cfg.tsteps_day * self.cfg.ndays
+				dt = P * self.cfg.ndays / initial_t_num
+			
+			self.t_num = 2  # Will be extended in main loop for steady-state convergence
+			self.t = np.array([0.0, dt])
+			
+			# Single output time point
+			self.t_out = np.array([0.0])
+			
+			# Store non-diurnal conditions as scalars (not arrays)
+			if self.cfg.sun:
+				self.mu_steady = self.cfg.steady_state_mu
+				self.F_steady = 1.0
+			else:
+				self.mu_steady = -1.0
+				self.F_steady = 0.0
+			
+			# Store dt for dynamic time extension
+			self.dt_steady = dt
+				
+			# Don't create mu_array and F_array for non-diurnal
 		else:
-			self.t_num = self.cfg.tsteps_day * self.cfg.ndays
-			self.t = np.linspace(0, P * self.cfg.ndays, self.t_num)
+			# Diurnal: full time arrays
+			# Set up integration time steps
+			if self.cfg.auto_dt:
+				self.t_num = self.grid.steps_per_day * self.cfg.ndays
+				self.t = np.arange(self.t_num) * self.grid.dt
+			else:
+				self.t_num = self.cfg.tsteps_day * self.cfg.ndays
+				self.t = np.linspace(0, P * self.cfg.ndays, self.t_num)
 
-		# Set up output time points
-		if self.cfg.last_day:
-			# Only output points from the final day
-			out_start = (self.cfg.ndays - 1) * P
-			out_end = self.cfg.ndays * P
-		else:
-			# Output points for all days
-			out_start = 0
-			out_end = self.cfg.ndays * P
-		
-		# Create output time points at exact intervals
-		points_per_day = self.cfg.freq_out
-		self.t_out = np.linspace(out_start, out_end, 
-								points_per_day * (1 if self.cfg.last_day else self.cfg.ndays))
-		
-		
-				# Handle non-diurnal cases
-		if self.cfg.diurnal:
+			# Set up output time points
+			if self.cfg.last_day:
+				# Only output points from the final day
+				out_start = (self.cfg.ndays - 1) * P
+				out_end = self.cfg.ndays * P
+			else:
+				# Output points for all days
+				out_start = 0
+				out_end = self.cfg.ndays * P
+			
+			# Create output time points at exact intervals
+			points_per_day = self.cfg.freq_out
+			self.t_out = np.linspace(out_start, out_end, 
+									points_per_day * (1 if self.cfg.last_day else self.cfg.ndays))
+			
 			# Solar angles for integration timesteps
 			hour_angle = (np.pi / (P / 2)) * (self.t - (P / 2))
 			mu = np.sin(self.cfg.dec)*np.sin(self.cfg.latitude) + np.cos(self.cfg.latitude) * np.cos(hour_angle) * np.cos(self.cfg.dec)
 			sun_up = mu > 0.001
 			F = sun_up.astype(float)
-		else:
-			if self.cfg.sun:
-				mu = np.full_like(self.t,self.cfg.steady_state_mu)
-				F = np.ones_like(self.t)
-			else:
-				mu = -np.ones_like(self.t)
-				F = np.zeros_like(self.t)
+			
+			# Set arrays for diurnal case
+			self.mu_array = mu
+			self.F_array = F
 		
-		self.mu_array = mu
-		self.F_array = F
+		# Calculate 3D sun vectors for crater thermal model
 		if(self.cfg.crater):
-			#Need to calculate x and y vectors for the 3D crater thermal model. 
-			# Old equations used in Cimlib. 
-			# Sun rises at +y (east)
-			# swings around to the +x direction (towards equator)
-			# setting at -y (west)
-			# Always stuck as a positive hemisphere (sun always goes to +x, even if lat is <0)
-			# Does not work on latitude = 0 due to divisin by 0 in azimuth angle equation. 
-			#sinazim = -np.sin(hour_angle)*np.cos(self.cfg.dec)/np.sin(np.arccos(mu))
-			#sun_x = np.sin(np.acos(mu))*np.cos(np.asin(sinazim))
-			#sun_y = np.sin(np.acos(mu))*sinazim
-			#sun_z = mu.copy()
-
-			# Simplified equations adjusted to same convention: +y is east, +x is south
-			# sun rises at +y (east)
-			# swings around to +x direction (south to equator) if lat is positive
-			# sets at -y (west)
-			# Can handle signed latitude,  non-zero declination, and zero latitude, whereas old equations could not. 
-			# sun_x is eqivalent to sun north value
+			# Simplified equations: +y is east, +x is south
+			# Can handle signed latitude, non-zero declination, and zero latitude
+			# sun_x is equivalent to sun north value
 			# sun_y is equivalent to sun east value
 			if(self.cfg.diurnal):
-				self.sun_x = -np.sin(self.cfg.dec)*np.cos(self.cfg.latitude) + np.cos(self.cfg.dec)*np.cos(hour_angle)*np.sin(self.cfg.latitude) #made this negative so that it goes to +x at noon if lat>0
+				hour_angle = (np.pi / (P / 2)) * (self.t - (P / 2))
+				self.sun_x = -np.sin(self.cfg.dec)*np.cos(self.cfg.latitude) + np.cos(self.cfg.dec)*np.cos(hour_angle)*np.sin(self.cfg.latitude)
 				self.sun_y = -np.cos(self.cfg.dec)*np.sin(hour_angle)
 				self.sun_z = mu.copy()
 			else:
-				self.sun_x = np.full_like(self.t,np.sin(np.arccos(self.cfg.steady_state_mu)))
-				self.sun_y = np.zeros_like(mu)
+				# Non-diurnal: fixed sun position (stored as scalars)
 				if(self.cfg.sun):
-					self.sun_z = np.full_like(self.t,self.cfg.steady_state_mu)
+					# Calculate sun position from steady_state_mu
+					sun_elevation = np.arccos(self.cfg.steady_state_mu)
+					sun_azimuth = 0.0  # Can be made configurable via config
+					self.sun_x_steady = np.sin(sun_elevation) * np.cos(sun_azimuth)
+					self.sun_y_steady = np.sin(sun_elevation) * np.sin(sun_azimuth)
+					self.sun_z_steady = self.cfg.steady_state_mu
 				else:
-					self.sun_z = -np.ones_like(mu)
+					# No sun
+					self.sun_x_steady = 0.0
+					self.sun_y_steady = 0.0
+					self.sun_z_steady = -1.0
 
 
 	def _bc(self, T, T_surf=0.0, Q = None):
@@ -267,7 +304,7 @@ class Simulator:
 				self.phi_vis_out = np.expand_dims(self.phi_vis_history[-1], axis=1)
 				self.phi_therm_out = np.expand_dims(self.phi_therm_history[-1], axis=1)
 			self.t_out = np.array([self.t_history[-1]])
-			self.mu_out = np.array([self.mu_array[-1]])
+			self.mu_out = np.array([self.mu_steady])
 			# Crater outputs (non-diurnal): just take last state
 			if self.cfg.crater:
 				self.T_crater_out = np.expand_dims(self.T_crater.copy(), axis=2)[:, :, 0]  # [depth, facets, 1] -> [depth, facets]
@@ -335,7 +372,10 @@ class Simulator:
 					self.phi_vis_out = phi_vis_hist[:, -len(self.t_out):]
 					self.phi_therm_out = phi_therm_hist[:, -len(self.t_out):]
 				self.T_surf_out = T_surf_hist[-len(self.t_out):]
-				self.mu_out = self.mu_array[-len(self.t_out):]
+				if self.cfg.diurnal:
+					self.mu_out = self.mu_array[-len(self.t_out):]
+				else:
+					self.mu_out = np.full(len(self.t_out), self.mu_steady)
 				# Crater outputs: fallback to last available
 				if self.cfg.crater and len(self.T_crater_history) > 0:
 					self.T_crater_out = T_crater_hist[:, :, -len(self.t_out):]
@@ -360,7 +400,7 @@ class Simulator:
 			print("Computing DISORT radiance spectra for output.")
 			for idx in range(self.T_out.shape[1]):
 				if non_diurnal:
-					F = self.F_array[-1]
+					F = self.F_steady
 				else:
 					t_hist = np.array(self.t_history)
 					t = self.t_out[idx]
@@ -383,6 +423,53 @@ class Simulator:
 			if self.cfg.multi_wave:
 				#Run disort again with spectral features removed to produce a smooth radiance spectrum for emissivity division. 
 				self.disort_emissivity()
+		
+		# Calculate observer radiance for crater if enabled
+		if (self.cfg.crater and self.cfg.compute_observer_radiance and 
+			hasattr(self, 'observer_radiance_calc')):
+			print("Computing crater observer radiance.")
+			
+			# Initialize observer radiance output array if not done yet (multi-wave case)
+			if self.observer_radiance_out is None:
+				n_observers = len(self.cfg.observer_vectors)
+				n_out = len(self.t_out)
+				if self.cfg.use_RTE and self.cfg.RTE_solver == 'disort' and self.cfg.multi_wave:
+					n_waves = len(self.rte_disort.wavenumbers)
+					self.observer_radiance_out = np.zeros((n_observers, n_waves, n_out))
+				else:
+					self.observer_radiance_out = np.zeros((n_observers, n_out))
+			
+			# Calculate observer radiance for each output time
+			for idx in range(len(self.t_out)):
+				print(f"Time {idx} of {len(self.t_out)}...")
+				if non_diurnal:
+					F = self.F_steady
+					mu_sun = self.mu_steady
+				else:
+					t_hist = np.array(self.t_history)
+					t = self.t_out[idx]
+					F_idx = np.argmin(np.abs(t_hist - t))
+					F = self.F_array[F_idx]
+					mu_sun = self.mu_array[F_idx]
+				
+				# Get crater temperature for this time step
+				if non_diurnal:
+					T_crater_time = self.T_crater_out.copy()  # [depth, n_facets]
+				else:
+					T_crater_time = self.T_crater_out[:, :, idx]  # [depth, n_facets]
+				
+				# Calculate radiance for all observers
+				observer_radiances = self.observer_radiance_calc.compute_all_observers(
+					T_crater_time, self.crater_mesh, self.crater_shadowtester, mu_sun, F
+				)
+				
+				# Store results
+				if self.cfg.use_RTE and self.cfg.RTE_solver == 'disort' and self.cfg.multi_wave:
+					# observer_radiances shape: [n_observers, n_waves]
+					self.observer_radiance_out[:, :, idx] = observer_radiances
+				else:
+					# observer_radiances shape: [n_observers]  
+					self.observer_radiance_out[:, idx] = observer_radiances
 
 
 	def run(self):
@@ -393,17 +480,41 @@ class Simulator:
 		check_convergence = not self.cfg.diurnal
 		n_check = getattr(self.cfg, 'steady_n_check', 200)  # How often to check
 		window = getattr(self.cfg, 'steady_window', 100)     # How far back to look for temperature history polynomial fit. 
-		tol = getattr(self.cfg, 'steady_tol', 0.5)         # Convergence threshold (K to extremum)
+		tol = getattr(self.cfg, 'steady_tol', 2.0)         # Convergence threshold (K to extremum)
 		converged = False
 
 		source_term = np.zeros(self.grid.x_num)
 		source_term_vis = np.zeros(self.grid.x_num)
 
-		for j in range(self.t_num):
+		# Handle non-diurnal vs diurnal time stepping
+		if not self.cfg.diurnal:
+			# Non-diurnal: extend time arrays as needed for steady-state convergence
+			j = 0
+			dt = self.t[1] - self.t[0]  # Get dt from setup
+			max_steps = 100000  # Safety limit for non-diurnal
+		else:
+			max_steps = self.t_num
+			
+		j = 0
+		while j < max_steps:
+			# For non-diurnal, extend time array if needed
+			if not self.cfg.diurnal and j >= len(self.t):
+				new_time = self.t[-1] + self.dt_steady
+				self.t = np.append(self.t, new_time)
+			
+			# Set current time and step
 			self.current_time = self.t[j]
 			self.current_step = j
-			self.mu = self.mu_array[j]
-			self.F = self.F_array[j]
+			
+			# Set mu and F based on diurnal vs non-diurnal
+			if not self.cfg.diurnal:
+				# Use steady scalar values
+				self.mu = self.mu_steady
+				self.F = self.F_steady
+			else:
+				# Use time-varying arrays
+				self.mu = self.mu_array[j]
+				self.F = self.F_array[j]
 
 			#Smooth surface model. 
 			if j > 0:
@@ -488,13 +599,26 @@ class Simulator:
 					self.flux_up_therm = np.full(self.n_facets,emissivity*self.cfg.sigma*self.T[0]**4.)
 				if j > 0:
 					#sun vector (pointing towards sun)
-					sun_vec = np.array([self.sun_x[j], self.sun_y[j], self.sun_z[j]])
-					#Calculate which crater facets are illuminated by the sun.
+					if not self.cfg.diurnal:
+						# Use steady scalar values
+						sun_vec = np.array([self.sun_x_steady, self.sun_y_steady, self.sun_z_steady])
+					else:
+						# Use time-varying arrays
+						sun_vec = np.array([self.sun_x[j], self.sun_y[j], self.sun_z[j]])
+					#Calculate which crater facets are illuminated by the sun and solar angles
 					if(self.F>0):
 						if j==1 or j%self.cfg.illum_freq==0:
 							self.illuminated = self.crater_shadowtester.illuminated_facets(sun_vec)
+							
+							# Calculate solar mu and phi for all facets using precomputed coordinates
+							from crater import compute_solar_angles_all_facets
+							self.mu_solar_facets, self.phi_solar_facets = compute_solar_angles_all_facets(
+								self.crater_mesh, sun_vec)
 					else:
 						self.illuminated = np.zeros_like(self.T_surf_crater)
+						# No solar illumination - set solar angles to zero
+						self.mu_solar_facets = np.zeros(self.n_facets)
+						self.phi_solar_facets = np.zeros(self.n_facets)
 					#Get direct visible flux, scattered visible flux, and self heating thermal flux for all crater facets. 
 					#Note that Q_dir and Q_scat have already been multiplied by (1-albedo)
 					#TO DO: For multi-wave, we need to pass the solar spectrum for each band. 
@@ -502,8 +626,8 @@ class Simulator:
 					Q_dir, Q_scat, Q_selfheat, cosines = self.crater_radtrans.compute_fluxes(
 						sun_vec, self.illuminated, self.flux_therm_crater,albedo, emissivity, F_sun,nwaves,multiple_scatter=True
 						)
-					if self.cfg.diurnal and j % max(100, self.t_num//20) == 0:
-						print(f"Q_dir, Q_scat, Q_selfheat {Q_dir[50]}/{Q_scat[50]}/{Q_selfheat[i]}")
+					# if self.cfg.diurnal and j % max(100, self.t_num//20) == 0:
+					# 	print(f"Q_dir, Q_scat, Q_selfheat {Q_dir[50]}/{Q_scat[50]}/{Q_selfheat[i]}")
 					#Q_dir is already multipled by 1-albedo, illum fraction, and the cosine of the incidence angle, so it is absorbed energy. 
 					#Q_scat is incident energy, so it is NOT multiplied by 1-albedo
 					#Q_selfheat is likewise not multplied by the absorptivity of the surface. 
@@ -512,19 +636,25 @@ class Simulator:
 					Q_selfheat /= np.pi
 					if self.cfg.use_RTE and self.cfg.RTE_solver == 'disort':
 						if(self.cfg.multi_wave):
-							source_term, flux_up = self.rte_disort_crater.disort_run(self.T_crater,cosines[:,0],self.illuminated, Q = Q_selfheat+Q_scat)
+							# Use proper solar mu and phi for each facet
+							source_term, flux_up = self.rte_disort_crater.disort_run(
+								self.T_crater, self.mu_solar_facets, self.illuminated, 
+								Q=Q_selfheat+Q_scat, phi=self.phi_solar_facets)
 							source_term_vis = np.zeros_like(source_term)
 							self.flux_therm_crater = flux_up.swapaxes(0,1)
 							self.flux_therm_crater[:,vis_range] = 0.0
 						else:
-							#In the standard two-wave mode, run disort again for thermal and visible portion of the spectrum. 
-							source_term, self.flux_therm_crater = self.rte_disort_crater.disort_run(self.T_crater,cosines*0.0,0.0, Q = Q_selfheat)
-							#plt.plot(source_term[0,:])
+							#In the standard two-wave mode, run disort for thermal and visible portions
+							# Thermal: no direct solar input (mu=0), only self-heating
+							source_term, self.flux_therm_crater = self.rte_disort_crater.disort_run(
+								self.T_crater, np.zeros(self.n_facets), np.zeros(self.n_facets), 
+								Q=Q_selfheat, phi=np.zeros(self.n_facets))
+							
 							if(np.any(Q_scat>1.0e-2)):
-								#Passing illuminated fraction in place of F here to appropriated adjust the incident solar intensity. 
-								#Some facets aren't directly illuminated but see indirect scattered sunlight, so we run for those cases here too. 
-								source_term_vis,_ = self.rte_disort_crater_vis.disort_run(self.T_crater,cosines,self.illuminated, Q = Q_scat)
-								#plt.plot(source_term_vis[0,:])
+								# Visible: use proper solar angles for scattered sunlight
+								source_term_vis,_ = self.rte_disort_crater_vis.disort_run(
+									self.T_crater, self.mu_solar_facets, self.illuminated, 
+									Q=Q_scat, phi=self.phi_solar_facets)
 							else:
 								source_term_vis = np.zeros_like(source_term)
 						for i in np.arange(len(self.T_surf_crater)):
@@ -534,7 +664,10 @@ class Simulator:
 							if self.cfg.use_RTE:
 								#Calculate mu
 								if(self.cfg.RTE_solver == 'hapke'):
-									source_term, self.phi_vis_prev_crater[:,i], self.phi_therm_prev_crater[:,i] = self.rte_hapke.compute_source(self.T_crater[:,i], self.phi_vis_prev_crater[:,i],self.phi_therm_prev_crater[:,i],cosines[i], self.illuminated[i], Q_therm=Q_selfheat[i],Q_vis=Q_scat[i])
+									# Use proper solar incidence angle for this facet
+									source_term, self.phi_vis_prev_crater[:,i], self.phi_therm_prev_crater[:,i] = self.rte_hapke.compute_source(
+										self.T_crater[:,i], self.phi_vis_prev_crater[:,i], self.phi_therm_prev_crater[:,i],
+										self.mu_solar_facets[i], self.illuminated[i], Q_therm=Q_selfheat[i], Q_vis=Q_scat[i])
 									#Calculate flux up from equation that phi = (up+down)/2, where down is the Q_therm from above. Multiply by pi as usual to convert from Hapke convention to flux in W/m2
 									self.flux_therm_crater[i] = (self.phi_therm_prev_crater[0,i]*2 - Q_selfheat[i])*np.pi
 								# elif(self.cfg.RTE_solver == 'disort'):
@@ -614,7 +747,15 @@ class Simulator:
 			# Optional progress updates
 			if self.cfg.diurnal and j % max(100, self.t_num//20) == 0:
 				print(f"Time step {j}/{self.t_num}")
-				
+			elif not self.cfg.diurnal and j % max(100, 1000) == 0:
+				print(f"Non-diurnal step {j}, time={self.current_time:.2f}s")
+			
+			# Increment loop counter
+			j += 1
+			
+			# For diurnal runs, break when we've completed all planned time steps
+			if self.cfg.diurnal and j >= self.t_num:
+				break
 
 		# Interpolate results to desired output times
 		self._make_outputs()
@@ -637,7 +778,7 @@ class Simulator:
 		print("Computing DISORT emissivity spectra for output.")
 		for idx in range(self.T_out.shape[1]):
 			if not self.cfg.diurnal:
-				F = self.F_array[-1]
+				F = self.F_steady
 			else:
 				t_hist = np.array(self.t_history)
 				t = self.t_out[idx]
@@ -693,12 +834,16 @@ def fit_blackbody_wn_banded(sim,wn_edges, radiance,idx=-1):
 		mask = (radiance > 0) & (B > 0)
 		return np.sum((np.log(radiance[mask]) - np.log(B[mask]))**2)
 	T0 = sim.T_out[1,idx]
-	minbound = sim.T_out[:,idx].min()-5
-	maxbound = sim.T_out[:,idx].max()+5
+	if sim.T_crater_out is not None:
+		minbound = sim.T_crater_out[:,:,idx].min()-5
+		maxbound = sim.T_crater_out[:,:,idx].max()+5
+	else:
+		minbound = sim.T_out[:,idx].min()-5
+		maxbound = sim.T_out[:,idx].max()+5
 	res = scipy.optimize.minimize(loss, [T0], bounds=[(minbound, maxbound)],)
 	T_fit = res.x[0]
 	B_fit = planck_wn_integrated(wn_edges, T_fit)
-	return T_fit, B_fit, radiance/B_fit, sim.rte_disort.wavenumbers[:idx]
+	return T_fit, B_fit, radiance/B_fit, sim.rte_disort.wavenumbers[:indx]
 
 
 def calculate_interface_T(T,i,alpha,beta):
@@ -765,7 +910,7 @@ def interactive_crater_temp_viewer(mesh, T_history, dt):
 	Interactive 3D viewer for crater temperature time series.
 	Args:
 		mesh: your CraterMesh object (with .vertices, .faces)
-		T_history: array [n_time, n_facets, n_depth] (use T_history[:,:,0] for surface)
+		T_history: array [n_facets, n_time] surface temperature
 		dt: timestep in seconds
 	"""
 	import numpy as np
@@ -780,8 +925,8 @@ def interactive_crater_temp_viewer(mesh, T_history, dt):
 
 	# Initial plot
 	time_idx = 0
-	temp = T_history[:,time_idx]
-	norm = plt.Normalize(np.min(T_history[:,:]), np.max(T_history[:,:]))
+	temp = T_history[:, time_idx]
+	norm = plt.Normalize(np.min(T_history), np.max(T_history))
 	facecolors = plt.cm.inferno(norm(temp))
 	poly3d = [verts[face] for face in faces]
 	pc = Poly3DCollection(poly3d, facecolors=facecolors, edgecolor='k', linewidths=0.05)
@@ -791,7 +936,7 @@ def interactive_crater_temp_viewer(mesh, T_history, dt):
 	ax.set_ylim([verts[:,1].min(), verts[:,1].max()])
 	ax.set_zlim([verts[:,2].min(), verts[:,2].max()])
 	ax.set_box_aspect([2,2,1])
-	ax.set_title(f"Time = {time_idx*dt:.1f} s")
+	ax.set_title(f"Surface Temperature - Time = {time_idx*dt:.1f} s")
 	mappable = plt.cm.ScalarMappable(cmap='inferno', norm=norm)
 	cbar = plt.colorbar(mappable, ax=ax, shrink=0.6)
 	cbar.set_label("Surface Temperature [K]")
@@ -803,15 +948,260 @@ def interactive_crater_temp_viewer(mesh, T_history, dt):
 
 	def update(val):
 		tidx = int(slider.val)
-		temp = T_history[:,tidx]
+		temp = T_history[:, tidx]
 		# Update color
 		new_facecolors = plt.cm.inferno(norm(temp))
 		pc.set_facecolor(new_facecolors)
-		ax.set_title(f"Time = {tidx*dt:.1f} s")
+		ax.set_title(f"Surface Temperature - Time = {tidx*dt:.1f} s")
 		fig.canvas.draw_idle()
 
 	slider.on_changed(update)
 	plt.show()
+
+def interactive_crater_radiance_viewer(mesh, observer_radiance_out, observer_vectors, t_out, cfg):
+	"""
+	Interactive 3D viewer for crater radiance as seen by different observers.
+	Args:
+		mesh: CraterMesh object
+		observer_radiance_out: observer radiance array
+		observer_vectors: list of observer direction vectors
+		t_out: output time array
+		cfg: simulation configuration
+	"""
+	import numpy as np
+	import matplotlib.pyplot as plt
+	from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+	from matplotlib.widgets import Slider
+	
+	# Get radiance data for visualization
+	if cfg.use_RTE and cfg.RTE_solver == 'disort' and cfg.multi_wave:
+		# Multi-wave case: observer_radiance_out shape [n_observers, n_waves, n_time]
+		# Use first wavelength for visualization
+		radiance_data = observer_radiance_out[:, 0, :]  # [n_observers, n_time]
+		title_suffix = " (First Wavelength)"
+	else:
+		# Two-wave case: observer_radiance_out shape [n_observers, n_time]  
+		radiance_data = observer_radiance_out
+		title_suffix = ""
+	
+	n_observers = len(observer_vectors)
+	n_times = len(t_out)
+	
+	# Create a synthetic radiance field by using observer vectors to determine facet visibility
+	# This is a simplified approach - in reality each facet would have different radiance
+	# based on its local temperature and viewing angle
+	verts = mesh.vertices
+	faces = mesh.faces
+	normals = mesh.normals
+	
+	fig = plt.figure(figsize=(12, 8))
+	ax = fig.add_subplot(111, projection='3d')
+	
+	# Initial state
+	time_idx = 0
+	observer_idx = 0
+	
+	# Calculate facet radiance based on visibility from current observer
+	observer_vec = np.array(observer_vectors[observer_idx]) / np.linalg.norm(observer_vectors[observer_idx])
+	facet_mu = np.dot(normals, observer_vec)
+	facet_mu[facet_mu < 0] = 0.0  # Only facets facing observer
+	
+	# Use the global radiance value scaled by facet visibility
+	global_radiance = radiance_data[observer_idx, time_idx]
+	facet_radiance = facet_mu * global_radiance
+	
+	# Set up normalization across all data
+	max_radiance = np.max(radiance_data)
+	min_radiance = np.min(radiance_data[radiance_data > 0])  # Avoid zero values in log scale
+	if min_radiance <= 0:
+		min_radiance = max_radiance * 1e-6
+	
+	# Use log normalization for radiance
+	from matplotlib.colors import LogNorm
+	norm = LogNorm(vmin=min_radiance, vmax=max_radiance)
+	
+	# Handle zero/negative radiance values
+	plot_radiance = np.maximum(facet_radiance, min_radiance)
+	
+	facecolors = plt.cm.plasma(norm(plot_radiance))
+	poly3d = [verts[face] for face in faces]
+	pc = Poly3DCollection(poly3d, facecolors=facecolors, edgecolor='k', linewidths=0.05)
+	meshplot = ax.add_collection3d(pc)
+
+	ax.set_xlim([verts[:,0].min(), verts[:,0].max()])
+	ax.set_ylim([verts[:,1].min(), verts[:,1].max()])
+	ax.set_zlim([verts[:,2].min(), verts[:,2].max()])
+	ax.set_box_aspect([2,2,1])
+	
+	# Format observer vector for display
+	obs_str = f"[{observer_vec[0]:.1f}, {observer_vec[1]:.1f}, {observer_vec[2]:.1f}]"
+	ax.set_title(f"Crater Radiance{title_suffix}\nObserver: {obs_str}, Time: {t_out[time_idx]:.1f} s")
+	
+	mappable = plt.cm.ScalarMappable(cmap='plasma', norm=norm)
+	cbar = plt.colorbar(mappable, ax=ax, shrink=0.6)
+	cbar.set_label("Radiance [W/m²/sr]")
+
+	# Two sliders: time and observer
+	axcolor = 'lightgoldenrodyellow'
+	ax_time_slider = plt.axes([0.2, 0.02, 0.5, 0.03], facecolor=axcolor)
+	ax_obs_slider = plt.axes([0.2, 0.06, 0.5, 0.03], facecolor=axcolor)
+	
+	time_slider = Slider(ax_time_slider, 'Time', 0, n_times-1, valinit=0, valfmt='%d')
+	obs_slider = Slider(ax_obs_slider, 'Observer', 0, n_observers-1, valinit=0, valfmt='%d')
+
+	def update_plot(time_idx, observer_idx):
+		# Get current observer vector and radiance
+		observer_vec = np.array(observer_vectors[observer_idx]) / np.linalg.norm(observer_vectors[observer_idx])
+		facet_mu = np.dot(normals, observer_vec)
+		facet_mu[facet_mu < 0] = 0.0
+		
+		# Scale global radiance by facet visibility
+		global_radiance = radiance_data[observer_idx, time_idx]
+		facet_radiance = facet_mu * global_radiance
+		plot_radiance = np.maximum(facet_radiance, min_radiance)
+		
+		# Update colors
+		new_facecolors = plt.cm.plasma(norm(plot_radiance))
+		pc.set_facecolor(new_facecolors)
+		
+		# Update title
+		obs_str = f"[{observer_vec[0]:.1f}, {observer_vec[1]:.1f}, {observer_vec[2]:.1f}]"
+		ax.set_title(f"Crater Radiance{title_suffix}\nObserver: {obs_str}, Time: {t_out[time_idx]:.1f} s")
+		fig.canvas.draw_idle()
+
+	def update_time(val):
+		tidx = int(time_slider.val)
+		oidx = int(obs_slider.val)
+		update_plot(tidx, oidx)
+	
+	def update_observer(val):
+		tidx = int(time_slider.val)
+		oidx = int(obs_slider.val)
+		update_plot(tidx, oidx)
+
+	time_slider.on_changed(update_time)
+	obs_slider.on_changed(update_observer)
+	plt.show()
+
+
+def plot_observer_radiance_time_series(observer_radiance_out, observer_vectors, t_out, cfg):
+	"""
+	Plot integrated radiance over time for each observer vector (non-multi-wave diurnal cases).
+	
+	Args:
+		observer_radiance_out: radiance array [n_observers, n_time]
+		observer_vectors: list of observer direction vectors
+		t_out: time array
+		cfg: simulation configuration
+	"""
+	plt.figure(figsize=(12, 6))
+	
+	n_observers = len(observer_vectors)
+	colors = plt.cm.tab10(np.linspace(0, 1, n_observers))
+	
+	for i, (observer_vec, color) in enumerate(zip(observer_vectors, colors)):
+		# Create observer label from vector
+		obs_label = f"Observer [{observer_vec[0]:.1f}, {observer_vec[1]:.1f}, {observer_vec[2]:.1f}]"
+		
+		# Plot radiance time series for this observer
+		plt.plot(t_out / 3600, observer_radiance_out[i, :], 
+				 label=obs_label, color=color, linewidth=2)
+	
+	plt.xlabel('Time (hours)')
+	plt.ylabel('Integrated Radiance (W/m²/sr)')
+	plt.title('Crater Observer Radiance vs Time')
+	plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+	plt.grid(True, alpha=0.3)
+	plt.tight_layout()
+	plt.show()
+
+
+def plot_observer_emissivity_spectra_interactive(observer_radiance_out, observer_vectors, t_out, cfg, sim):
+	"""
+	Interactive emissivity spectrum plot with time slider for multi-wave cases.
+	Shows emissivity spectrum for each observer angle at each time step.
+	
+	Args:
+		observer_radiance_out: radiance array [n_observers, n_waves, n_time]
+		observer_vectors: list of observer direction vectors  
+		t_out: time array
+		cfg: simulation configuration
+		sim: simulator object (for wavelength info)
+	"""
+	from matplotlib.widgets import Slider
+	
+	# Get wavelength information from the simulator
+	if hasattr(sim, 'rte_disort') and hasattr(sim.rte_disort, 'wavenumbers'):
+		wavenumbers = sim.rte_disort.wavenumbers
+		wavelengths = 10000.0 / wavenumbers  # Convert cm^-1 to microns
+	else:
+		print("Warning: Could not get wavelength information from simulator")
+		return
+	
+	n_observers, n_waves, n_times = observer_radiance_out.shape
+	
+	wn_cutoff = 1500  # cm^-1, cutoff for fitting blackbody
+	indx = np.argmin(np.abs(wavenumbers - wn_cutoff))
+
+	# Calculate emissivity by dividing by blackbody radiance at surface temperature
+	emissivity_data = np.zeros_like(observer_radiance_out)
+	
+	for t_idx in range(n_times):
+		for obs_idx in range(n_observers):
+			# Read bin edges from config
+			wn_bounds = np.loadtxt(sim.cfg.wn_bounds_out)
+			T_fit, B_fit, emiss_spec, wn_BB = fit_blackbody_wn_banded(sim,wn_bounds, observer_radiance_out[obs_idx, :, t_idx],idx=t_idx)
+			idx1 = np.argmin(np.abs(wavenumbers - 900))
+			idx2 = np.argmin(np.abs(wavenumbers - 1200))
+			cf_emis = emiss_spec[idx1:idx2].max()
+			emissivity_data[obs_idx, :indx, t_idx] = emiss_spec + 1 - cf_emis
+	
+	# Create the interactive plot
+	fig, ax = plt.subplots(figsize=(12, 8))
+	plt.subplots_adjust(bottom=0.25)
+	
+	# Initial time index
+	time_idx = 0
+	
+	# Plot initial spectra for all observers
+	colors = plt.cm.tab10(np.linspace(0, 1, n_observers))
+	lines = []
+	
+	for obs_idx, (observer_vec, color) in enumerate(zip(observer_vectors, colors)):
+		obs_label = f"Observer [{observer_vec[0]:.1f}, {observer_vec[1]:.1f}, {observer_vec[2]:.1f}]"
+		line, = ax.plot(wavenumbers[:indx], emissivity_data[obs_idx, :indx, time_idx], 
+						label=obs_label, color=color, linewidth=2)
+		lines.append(line)
+	
+	ax.set_xlabel('Wavenumber (cm-1)')
+	ax.set_ylabel('Emissivity')
+	ax.set_title(f'Crater Observer Emissivity Spectra - Time: {t_out[time_idx]/3600:.2f} hours')
+	ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+	ax.grid(True, alpha=0.3)
+	ax.set_ylim([0, 1.2])
+	ax.set_xlim([wavenumbers.min(), wavenumbers[:indx].max()])
+	
+	# Add time slider
+	axcolor = 'lightgoldenrodyellow'
+	ax_time_slider = plt.axes([0.2, 0.1, 0.5, 0.03], facecolor=axcolor)
+	time_slider = Slider(ax_time_slider, 'Time', 0, n_times-1, valinit=0, valfmt='%d')
+	
+	def update_plot(val):
+		tidx = int(time_slider.val)
+		
+		# Update all observer lines
+		for obs_idx, line in enumerate(lines):
+			line.set_ydata(emissivity_data[obs_idx, :indx, tidx])
+		
+		# Update title
+		ax.set_title(f'Crater Observer Emissivity Spectra - Time: {t_out[tidx]/3600:.2f} hours')
+		fig.canvas.draw_idle()
+	
+	time_slider.on_changed(update_plot)
+	plt.tight_layout()
+	plt.gca().invert_xaxis()
+	plt.show()
+
 
 if __name__ == "__main__":
 	sim = Simulator()
@@ -959,7 +1349,27 @@ if __name__ == "__main__":
 
 	# --- Crater 3D surface temperature visualization ---
 	if sim.cfg.crater and hasattr(sim, 'T_surf_crater_out'):
+		print("Displaying interactive crater temperature viewer...")
 		interactive_crater_temp_viewer(sim.crater_mesh, sim.T_surf_crater_out, sim.grid.dt)
-
-
 		
+		# Show observer radiance plots if available
+		if (sim.cfg.compute_observer_radiance and hasattr(sim, 'observer_radiance_out') 
+			and sim.observer_radiance_out is not None):
+			
+			if sim.cfg.multi_wave and sim.cfg.diurnal:
+				# Multi-wave case: interactive emissivity spectrum plot with time slider
+				print("Displaying interactive crater observer emissivity spectra...")
+				plot_observer_emissivity_spectra_interactive(sim.observer_radiance_out, 
+														   sim.cfg.observer_vectors, 
+														   sim.t_out, sim.cfg, sim)
+			elif sim.cfg.diurnal and not sim.cfg.multi_wave:
+				# Non-multi-wave diurnal case: time series plot for each observer
+				print("Displaying crater observer radiance time series...")
+				plot_observer_radiance_time_series(sim.observer_radiance_out, 
+												  sim.cfg.observer_vectors, 
+												  sim.t_out, sim.cfg)
+			else:
+				# For non-diurnal cases, show the existing 3D crater radiance viewer
+				print("Displaying interactive crater radiance viewer...")
+				interactive_crater_radiance_viewer(sim.crater_mesh, sim.observer_radiance_out, 
+												 sim.cfg.observer_vectors, sim.t_out, sim.cfg)

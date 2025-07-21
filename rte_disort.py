@@ -8,13 +8,15 @@ from scipy.interpolate import interpn
 
 
 class DisortRTESolver:
-    def __init__(self, config: SimulationConfig, grid: LayerGrid, n_cols = 1, output_radiance=False, uniform_props=False,planck=True):
+    def __init__(self, config: SimulationConfig, grid: LayerGrid, n_cols = 1, output_radiance=False, uniform_props=False,planck=True, observer_mu=1.0, observer_phi=0.0):
         self.cfg = config
         self.grid = grid
         self.output_radiance = output_radiance
         self.uniform_props = uniform_props
         self.planck = planck
         self.n_cols = n_cols
+        self.observer_mu = observer_mu
+        self.observer_phi = observer_phi
         #For multi-wavelength cases, load optical and solar constants from files
         if(self.cfg.multi_wave):
             self._load_constants()
@@ -150,7 +152,7 @@ class DisortRTESolver:
                     Et = n_p * self.Cext_array[i_wave]*1e-12 #extinction coefficient at this wavelength, converting Cext from µm^2 to m^2 in the process. 
                     if(self.uniform_props):
                         Et = n_p * np.mean(self.Cext_array[self.wn_min:self.wn_max])*1e-12
-                    Et = Et*0.0 + 220.0 #manual override to fixed value for testing 
+                    #Et = Et*0.0 + 220.0 #manual override to fixed value for testing 
                     tau_boundaries = Et*self.grid.x_boundaries/self.cfg.Et #tau at boundaries of each layer, convert from global Et to wavelength-specific Et.  
                     dtau = tau_boundaries[1:] - tau_boundaries[:-1] #tau thickness of each layer
                     tau_layer = torch.tensor(dtau,dtype=torch.float64)
@@ -160,16 +162,16 @@ class DisortRTESolver:
                         ssalb_val = self.cfg.disort_ssalb_vis
                     if(self.uniform_props):
                         ssalb_val = np.mean(self.ssalb_array[self.wn_min:self.wn_max])
-                    if self.wavenumbers[i_wave] >3330.0: 
-                        ssalb_val = ssalb_val*0.0 + 0.5 #manual override to fixed value for testing VISIBLE. 
-                    else:
-                        ssalb_val = ssalb_val*0.0 + 0.1 #manual override for fixed value testing THERMAL
+                    # if self.wavenumbers[i_wave] >3330.0: 
+                    #     ssalb_val = ssalb_val*0.0 + 0.5 #manual override to fixed value for testing VISIBLE. 
+                    # else:
+                    #     ssalb_val = ssalb_val*0.0 + 0.1 #manual override for fixed value testing THERMAL
                     ssa_layer = torch.full([n_layers], ssalb_val,dtype=torch.float64)
                     g_val = self.g_array[i_wave]
                     if(self.cfg.force_vis_disort and self.wavenumbers[i_wave] >3330.0):
                         #Force all visible wavelengths to use the DISORT default value for visible scattering asymmetry factor
                         g_val = self.cfg.disort_g_vis
-                    g_val = g_val*0.0 #manual override to fixed value for testing. 
+                    #g_val = g_val*0.0 #manual override to fixed value for testing. 
                     if(self.uniform_props):
                         g_val = np.mean(self.g_array[self.wn_min:self.wn_max])
                     moms = scattering_moments(self.cfg.nmom, "henyey-greenstein", g_val)
@@ -204,8 +206,8 @@ class DisortRTESolver:
             op.ds().nmom = self.cfg.nmom_out
             op.ds().nstr = self.cfg.nstr_out
             op.ds().nphase = self.cfg.nmom_out
-            op.user_mu(np.array([1.0])) #Specify zenith angle for measuring intensity
-            op.user_phi(np.array([0.0])) #Specify azimuth angle for measuring intensity. 
+            op.user_mu(np.array([self.observer_mu])) #Specify zenith angle for measuring intensity
+            op.user_phi(np.array([self.observer_phi])) #Specify azimuth angle for measuring intensity. 
         else:
             if self.planck:
                 op.flags("lamber,quiet,onlyfl,intensity_correction,planck")
@@ -245,9 +247,9 @@ class DisortRTESolver:
     
 
 
-    def disort_run(self,  T, mu, F , Q=None):
+    def disort_run(self, T, mu, F, Q=None, phi=None):
         #Solve RTE using DISORT for both visible and thermal bands.
-        #mu, F, and Q should all either be supplied as scalars or as arrays with length=n_cols
+        #mu, F, Q, and phi should all either be supplied as scalars or as arrays with length=n_cols
 
         #Account for some crater shadow cases where the sun is up but the facet is not illuminated. 
         F *= mu > 0.001
@@ -322,10 +324,20 @@ class DisortRTESolver:
             else:
                 self.btemp.fill_(T_interface)
         
+        # Set solar incidence angles
         if(self.n_cols>1):
             self.umu0[:] = torch.from_numpy(mu)
+            # Set solar azimuth angles if provided
+            if phi is not None:
+                self.phi0[:] = torch.from_numpy(phi)
+            else:
+                self.phi0.fill_(0.0)  # Default to 0 if not provided
         else:
             self.umu0[:] = mu
+            if phi is not None:
+                self.phi0.fill_(phi)
+            else:
+                self.phi0.fill_(0.0)  # Default to 0 if not provided
 
         bc = {
             "umu0": self.umu0, #Cosine of solar incidence angle

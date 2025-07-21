@@ -4,7 +4,6 @@ from stencils import (
     fd1d_heat_implicit_diagonal_nonuniform_kieffer,
     fd1d_heat_implicit_matrix_nonuniform_kieffer
 )
-from parse_input_files import load_mie_folder
 
 # -----------------------------------------------------------------------------
 # File: grid.py

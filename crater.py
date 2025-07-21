@@ -14,6 +14,8 @@ class CraterMesh:
         self.vertices,  self.faces = self.load_mesh(mesh_file,nvtx,nfaces)
         self.sub_vertices, self.sub_faces, self.sub_face_index = self.subdivide()
         self.normals, self.areas, self.centroids, self.sub_normals, self.sub_areas, self.sub_centroids = self.compute_geometry()
+        # Precompute local coordinate systems for consistent solar/observer angle calculations
+        self.tangent1, self.tangent2 = self._compute_local_coordinates()
 
     def load_mesh(self, mesh_file,nvtx,nfaces):
         vertices, faces = [], []
@@ -55,6 +57,84 @@ class CraterMesh:
         sub_centroids = (v0 + v1 + v2) / 3
         return normals, areas, centroids, sub_normals, sub_areas, sub_centroids
     
+    def _compute_local_coordinates(self):
+        """
+        Precompute local coordinate system (tangent vectors) for each facet.
+        Uses same logic as observer_radiance.py for consistency between 
+        solar illumination and observer viewing angle calculations.
+        
+        Returns:
+            tangent1: first tangent vector for each facet [n_facets, 3]
+            tangent2: second tangent vector for each facet [n_facets, 3]
+        """
+        n_facets = len(self.normals)
+        tangent1 = np.zeros((n_facets, 3))
+        tangent2 = np.zeros((n_facets, 3))
+        
+        for i, normal in enumerate(self.normals):
+            # Create local coordinate system for this facet
+            # Normal is the local z-axis, need to define x and y axes
+            if abs(normal[2]) < 0.9:
+                # If normal is not too close to [0,0,1], use [0,0,1] x normal as reference
+                tangent1[i] = np.cross([0, 0, 1], normal)
+            else:
+                # If normal is close to [0,0,1], use [1,0,0] x normal as reference  
+                tangent1[i] = np.cross([1, 0, 0], normal)
+            
+            tangent1[i] = tangent1[i] / np.linalg.norm(tangent1[i])
+            tangent2[i] = np.cross(normal, tangent1[i])
+        
+        return tangent1, tangent2
+
+
+def compute_solar_angles_all_facets(crater_mesh, sun_vec):
+    """
+    Calculate mu and phi for sun vector in each facet's local coordinate system.
+    Uses same coordinate system as observer calculations for consistency.
+    
+    Args:
+        crater_mesh: CraterMesh object with precomputed tangent vectors
+        sun_vec: solar direction vector [x, y, z] (pointing towards sun)
+        
+    Returns:
+        mu_solar: cosine of solar incidence angle for each facet [n_facets]
+        phi_solar: solar azimuth angle in local coordinates for each facet [n_facets]
+    """
+    normals = crater_mesh.normals
+    tangent1 = crater_mesh.tangent1
+    tangent2 = crater_mesh.tangent2
+    n_facets = len(normals)
+    
+    # Solar incidence angles (dot product with normals)
+    mu_solar = np.dot(normals, sun_vec)
+    mu_solar[mu_solar < 0] = 0.0  # Only facets facing sun have positive mu
+    
+    # Solar azimuth angles in local coordinate systems
+    phi_solar = np.zeros(n_facets)
+    
+    for i in range(n_facets):
+        if mu_solar[i] <= 0:
+            continue
+            
+        # Project sun vector into facet plane
+        sun_in_plane = sun_vec - mu_solar[i] * normals[i]
+        sun_in_plane_norm = np.linalg.norm(sun_in_plane)
+        
+        if sun_in_plane_norm > 1e-10:
+            sun_in_plane = sun_in_plane / sun_in_plane_norm
+            
+            # Calculate azimuth in local coordinate system
+            cos_phi = np.dot(sun_in_plane, tangent1[i])
+            sin_phi = np.dot(sun_in_plane, tangent2[i])
+            phi_solar[i] = np.arctan2(sin_phi, cos_phi)
+            
+            if phi_solar[i] < 0:
+                phi_solar[i] += 2 * np.pi
+        else:
+            # Sun is along the normal direction, phi is arbitrary
+            phi_solar[i] = 0.0
+    
+    return mu_solar, phi_solar
 
 
 class SelfHeatingList:
