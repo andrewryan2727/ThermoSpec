@@ -17,7 +17,7 @@ class SimulationConfig:
     # Basic optical properties. 
     ssalb_vis: float = 0.5           # single-scattering visible albedo
     ssalb_therm: float = 0.1         # single-scattering visible albedo. Influences the overall effective emissivity of the regolith bed. ssalb_therm=0.1 leads to emissivity ~0.95. 
-    Et: float = 1000.0                 # thermal extinction coefficient (m^-1)
+    Et: float = 50000.0                 # thermal extinction coefficient (m^-1)
     eta: float = 1.0                 # visible/thermal extinction coefficient ratio 
     g_vis: float = 0.0               # disort Scattering assymetry parameter for thermal spectrum in disort (not used for multi-wave)
     g_therm: float = 0.0             # disort Scattering assymetry parameter for visible spectrum in disort (not used for multi-wave)
@@ -43,7 +43,7 @@ class SimulationConfig:
 
     # Dust (or top layer) material properties
     single_layer: bool = True        # use single-layer model instead of two-layer. If single layer, only dust properties are used. 
-    k_dust: float = 5.5e-5           # dust thermal conductivity (W/m/K). If using RTE model, this should just be phonon conduction. 5.5e-4
+    k_dust: float = 5.5e-4           # dust thermal conductivity (W/m/K). If using RTE model, this should just be phonon conduction. 5.5e-4
     rho_dust: float = 700.         # dust bulk density (kg/m^3) 366
     cp_dust: float = 825.0           # dust specific heat (J/kg/K) 700
     k_dust_auto: bool = False        # use auto-calculated dust thermal conductivity for non-RTE models. If False, use k_dust value directly.
@@ -54,7 +54,7 @@ class SimulationConfig:
     cp_rock: float = 700.0           # rock heat capacity (J/kg/K)
 
     # Boundary & layer settings
-    T_bottom: float = 282.           # bottom boundary temperature (when Dirichlet) and global initialization temperature (K)
+    T_bottom: float = 300.           # bottom boundary temperature (when Dirichlet) and global initialization temperature (K)
     dust_thickness: float = 1.0  # dust column total thickness (m)
     rock_thickness: float = 1.0     # rock substrate column total thickness (m)
     auto_thickness: bool = True      # auto-calculate dust and rock layer thicknesses based on thermal skin depth
@@ -70,8 +70,8 @@ class SimulationConfig:
     use_RTE: bool = True             # use radiative transfer model, otherwise runs traditional thermal model. 
     RTE_solver: str = 'disort'       # Options are 'disort' or 'hapke'
     bottom_bc: str = 'neumann'       # bottom boundary condition choices: "neumann" (zero‐flux), "dirichlet" (fixed T_bottom)
-    sun: bool = True                 # include solar input
-    diurnal: bool = True             # include diurnal variation. If false, model is steady-state. 
+    sun: bool = False                 # include solar input
+    diurnal: bool = False             # include diurnal variation. If false, model is steady-state. 
     
     steady_state_mu: float = np.cos(np.radians(30.0)) #Solar incidence angle for steady steate runs with the sun turned on.
 
@@ -96,34 +96,35 @@ class SimulationConfig:
     #DISORT radiative transfer options. 
     ##################################
     # Note that nmom and nstr are usuall equal. 
-    nmom: int = 4            # Number of moments to phase function. But be >= nstr. Recommended ≥4
-    nstr: int = 4            # Number of streams for disort discrete ordinate method. Recommended ≥4
+    nmom: int = 8            # Number of moments to phase function. But be >= nstr. Recommended ≥4
+    nstr: int = 8            # Number of streams for disort discrete ordinate method. Recommended ≥4
 
     #DISORT multi-wavelength options. Note that Cext in files is assumed to be in units of µm^2, as it is likely that the user defined particle size and wavelength in µm. 
     multi_wave: bool = True  # Use multiple wavelengths, using wavelength-dependent optical properties from file (extinction coefficient, ssalb, scattering matrix moments)
-    T_fixed: bool = False    # Use initialization temperature to calculate radiance and emissivity spectra. No thermal evolution. Only valid if diurnal=False. 
+    T_fixed: bool = True    # Use initialization temperature to calculate radiance and emissivity spectra. No thermal evolution. Only valid if diurnal=False. 
     #folder: str = "/Users/ryan/Research/RT_models/RT_thermal_model/optical_constants/Quartz_5micron_30wns/pack_frac_0.35/output" #path to scattering table files
-    mie_file: str = "/Users/ryan/Research/RT_models/RT_thermal_model/Preprocessing/serp85_mag5_dol5_graph5_10um_32.txt"   #Table of values from Mie code.  
+    mie_file: str = "/Users/ryan/Research/RT_models/RT_thermal_model/Preprocessing/enst_300K_mie_combined.txt"   #Table of values from Mie code.  
     solar_spectrum_file: str = '/Users/ryan/Research/RT_models/RT_thermal_model/Preprocessing/solar_integrated_32.txt'  #integrates solar spectrum. Must have same spectral sampling as scattering matrix. 
     substrate_spectrum: str = '/Users/ryan/Research/RT_models/RT_thermal_model/Preprocessing/Orgueil_P11442_VEH_32wns.txt' #Bennu emissivity spectrum for substrate
-    wn_bounds: str = '/Users/ryan/Research/RT_models/RT_thermal_model/Preprocessing/wn_bounds_32.txt' #Wavenumber bounds for input files.
-    use_spec: bool = True     #Use emissivity spectrum for substrate. If false, uses global reflectivity value R_base
+    wn_bounds: str = '/Users/ryan/Research/RT_models/RT_thermal_model/Preprocessing/enst_300K_wn_bounds.txt' #Wavenumber bounds for input files.
+    use_spec: bool = False     #Use emissivity spectrum for substrate. If false, uses global reflectivity value R_base
     R_base: float = 0.0       # Substrate reflectivity for 2-layer model. Used if multi_wave=False and/or use_spec=False. 
-    fill_frac: float = 0.15   #Fill fraction for particles. 
-    radius: float = 10.0e-6    #Particle radius in meters. 
+    fill_frac: float = 0.37   #Fill fraction for particles. 
+    radius: float = 28.e-6/2.0    #Particle radius in meters. 
     
     #Output settings. Choose files with desired multiwave spectral sampling for calculating radiance output. 
-    mie_file_out: str = "/Users/ryan/Research/RT_models/RT_thermal_model/Preprocessing/serp85_mag5_dol5_graph5_10um_216.txt"    
+    mie_file_out: str = "/Users/ryan/Research/RT_models/RT_thermal_model/Preprocessing/enst_300K_mie_combined.txt"    
     solar_spectrum_file_out: str = '/Users/ryan/Research/RT_models/RT_thermal_model/Preprocessing/solar_integrated_216.txt'  #integrates solar spectrum. Must have same spectral sampling as scattering matrix. 
-    substrate_spectrum_out: str = '/Users/ryan/Research/RT_models/RT_thermal_model/Preprocessing/Orgueil_P11442_VEH_216wns.txt' #Bennu emissivity spectrum for substrate
+    substrate_spectrum_out: str = '/Users/ryan/Research/RT_models/RT_thermal_model/Preprocessing/sabel_enstatite.txt' #Bennu emissivity spectrum for substrate
     otesT1_out: str = '/Users/ryan/Research/RT_models/RT_thermal_model/Preprocessing/Bennu_Type1_216wns.txt' #Output file for OTES T2 radiance outputs.
     otesT2_out: str = '/Users/ryan/Research/RT_models/RT_thermal_model/Preprocessing/Bennu_Type2_216wns.txt' #Output file for OTES T2 radiance outputs.
-    wn_bounds_out: str = '/Users/ryan/Research/RT_models/RT_thermal_model/Preprocessing/wn_bounds_216.txt' #Wavenumber bounds for output files.
+    wn_bounds_out: str = '/Users/ryan/Research/RT_models/RT_thermal_model/Preprocessing/enst_300K_wn_bounds.txt' #Wavenumber bounds for output files.
     nstr_out: int = 16        #Number of streams for calculating radiance outputs. ≥16 recommended. 
     nmom_out: int = 16        #Number of scattering moments for radiance outputs. Must be ≥ nstr_out
+    observer_mu: int = np.cos(np.radians(0.0))
 
     #DISORT optical properties for visible portion of the spectrum
-    force_vis_disort: bool = True  # Force visible optical properties to be used for visible portion of the spectrum. If False, uses optical propereties loaded from files above. 
+    force_vis_disort: bool = False  # Force visible optical properties to be used for visible portion of the spectrum. If False, uses optical propereties loaded from files above. 
     disort_ssalb_vis: float = 0.060  # Single-scattering albedo for visible portion of the spectrum. Only used if force_vis=True.Bennu 0.060
     disort_g_vis: float = -0.25  # Scattering assymetry parameter for visible portion of the spectrum. Only used if force_vis=True. Bennu -0.25
 

@@ -2,6 +2,7 @@ import numpy as np
 from rte_disort import DisortRTESolver
 from config import SimulationConfig
 from grid import LayerGrid
+from crater import CraterRadiativeTransfer, compute_multiple_scattered_sunlight
 
 class ObserverRadianceCalculator:
     """
@@ -106,7 +107,9 @@ class ObserverRadianceCalculator:
         return disort_thermal, disort_vis
     
     def compute_crater_radiance(self, T_crater_facets, crater_mesh, crater_shadowtester, 
-                               observer_idx, mu_sun=0.0, F_sun=0.0):
+                               observer_idx, mu_sun=0.0, F_sun=0.0, sun_vec=None, 
+                               crater_radtrans=None, therm_flux_facets=None, 
+                               illuminated=None, albedo=None, emissivity=None):
         """
         Calculate total crater radiance as seen by a specific observer.
         Creates DISORT instances dynamically for each facet with correct viewing angles.
@@ -118,6 +121,12 @@ class ObserverRadianceCalculator:
             observer_idx: index of observer
             mu_sun: solar cosine (for scattered light calculation)
             F_sun: solar illumination flag
+            sun_vec: solar direction vector [x, y, z] (for scattered light calculation)
+            crater_radtrans: CraterRadiativeTransfer object (for scattered light)
+            therm_flux_facets: thermal flux from all facets [n_facets, n_waves]
+            illuminated: illuminated fraction for each facet [n_facets]
+            albedo: surface albedo (scalar or array)
+            emissivity: surface emissivity (scalar or array)
             
         Returns:
             total_radiance: area-weighted summed radiance from all visible facets
@@ -139,7 +148,30 @@ class ObserverRadianceCalculator:
             n_waves = len(temp_disort.wavenumbers)
             total_radiance = np.zeros(n_waves)
         else:
+            n_waves = 1
             total_radiance = 0.0
+        
+        # Calculate scattered energy incident upon the surface (Q_scat and Q_selfheat)
+        Q_scat_facets = np.zeros((len(crater_mesh.normals), n_waves))
+        Q_selfheat_facets = np.zeros((len(crater_mesh.normals), n_waves))
+        
+        if (crater_radtrans is not None and sun_vec is not None and 
+            illuminated is not None and albedo is not None and 
+            therm_flux_facets is not None):
+            
+            # Calculate scattered solar energy and self-heating for all facets
+            _, Q_scat_all, Q_selfheat_all, _ = crater_radtrans.compute_fluxes(
+                sun_vec, illuminated, therm_flux_facets, albedo, emissivity, 
+                F_sun, n_waves, multiple_scatter=True
+            )
+            
+            # Convert to intensity by dividing by pi (as done in main model)
+            if n_waves == 1:
+                Q_scat_facets[:, 0] = Q_scat_all / np.pi
+                Q_selfheat_facets[:, 0] = Q_selfheat_all / np.pi
+            else:
+                Q_scat_facets = Q_scat_all / np.pi
+                Q_selfheat_facets = Q_selfheat_all / np.pi
             
         total_projected_area = 0.0
         
@@ -155,10 +187,20 @@ class ObserverRadianceCalculator:
             try:
                 disort_thermal, disort_vis = self.create_disort_for_facet(facet_mu[i], facet_phi[i])
                 
-                # Calculate radiance from this facet using facet-specific DISORT
+                # Get total scattered energy for this facet (Q_scat + Q_selfheat)
+                if n_waves == 1:
+                    Q_vis = Q_scat_facets[i, 0]
+                    Q_therm = Q_selfheat_facets[i, 0]
+                else:
+                    Q_vis = Q_scat_facets[i, :]
+                    Q_therm = Q_selfheat_facets[i, :]
+                Q_total = Q_vis + Q_therm
+
+                
+                # Calculate radiance from this facet using facet-specific DISORT with scattered energy
                 if self.cfg.multi_wave:
                     # Multi-wave case: return full spectral radiance
-                    radiance = disort_thermal.disort_run(T_facet, mu_sun, F_sun)
+                    radiance = disort_thermal.disort_run(T_facet, mu_sun, F_sun, Q=Q_total)
                     if hasattr(radiance, 'numpy'):
                         radiance = radiance.numpy()
                     # radiance should be shape [n_waves] or [n_waves, 1]
@@ -168,8 +210,8 @@ class ObserverRadianceCalculator:
                         facet_radiance = radiance
                 else:
                     # Two-wave case: thermal + visible, return single value
-                    rad_thermal = disort_thermal.disort_run(T_facet, mu_sun, F_sun)
-                    rad_vis = disort_vis.disort_run(T_facet, mu_sun, F_sun)
+                    rad_thermal = disort_thermal.disort_run(T_facet, mu_sun, F_sun, Q=Q_therm)
+                    rad_vis = disort_vis.disort_run(T_facet, mu_sun, F_sun, Q=Q_vis)
                     
                     if hasattr(rad_thermal, 'numpy'):
                         rad_thermal = rad_thermal.numpy()
@@ -205,7 +247,9 @@ class ObserverRadianceCalculator:
                 return 0.0
     
     def compute_all_observers(self, T_crater_facets, crater_mesh, crater_shadowtester,
-                            mu_sun=0.0, F_sun=0.0):
+                            mu_sun=0.0, F_sun=0.0, sun_vec=None, crater_radtrans=None, 
+                            therm_flux_facets=None, illuminated=None, albedo=None, 
+                            emissivity=None):
         """
         Calculate crater radiance for all observers.
         
@@ -215,6 +259,12 @@ class ObserverRadianceCalculator:
             crater_shadowtester: ShadowTester object
             mu_sun: solar cosine
             F_sun: solar illumination flag
+            sun_vec: solar direction vector [x, y, z] (for scattered light calculation)
+            crater_radtrans: CraterRadiativeTransfer object (for scattered light)
+            therm_flux_facets: thermal flux from all facets [n_facets, n_waves]
+            illuminated: illuminated fraction for each facet [n_facets]
+            albedo: surface albedo (scalar or array)
+            emissivity: surface emissivity (scalar or array)
             
         Returns:
             radiances: array of radiance for each observer
@@ -231,7 +281,8 @@ class ObserverRadianceCalculator:
         
         for i in range(len(self.observers)):
             radiances[i] = self.compute_crater_radiance(
-                T_crater_facets, crater_mesh, crater_shadowtester, i, mu_sun, F_sun
+                T_crater_facets, crater_mesh, crater_shadowtester, i, mu_sun, F_sun,
+                sun_vec, crater_radtrans, therm_flux_facets, illuminated, albedo, emissivity
             )
             
         return radiances

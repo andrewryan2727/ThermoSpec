@@ -61,14 +61,18 @@ class DisortRTESolver:
         self.Cext_array = mie_params[sortidx,2]
         self.Csca_array = mie_params[sortidx,3]
         self.ssalb_array = mie_params[sortidx,4]
-        solar_array = np.loadtxt(solar_file)
-        if(len(solar_array[:,0]) != len(self.wavenumbers) or np.max(solar_array[:,0]-self.wavenumbers)>0.1):
-            print("Warning: Solar spectrum file wavenumbers do not match scattering files!")
-        self.solar = solar_array[:,1]/self.cfg.R**2.
-        emiss_spec = np.loadtxt(emissivity_file)
-        if(len(emiss_spec[:,0]) != len(self.wavenumbers) or np.max(emiss_spec[:,0]-self.wavenumbers)>0.1):
-            print("Warning: Emissivity spectrum file wavenumbers do not match scattering files!")
-        self.emiss_base = emiss_spec[:,1]
+        if self.cfg.diurnal or self.cfg.sun:
+            #Load multi-wave solar flux file. 
+            solar_array = np.loadtxt(solar_file)
+            if(len(solar_array[:,0]) != len(self.wavenumbers) or np.max(solar_array[:,0]-self.wavenumbers)>0.1):
+                print("Warning: Solar spectrum file wavenumbers do not match scattering files!")
+            self.solar = solar_array[:,1]/self.cfg.R**2.
+        if(self.cfg.use_spec):
+            #Load emissivity spectrum for substrate. 
+            emiss_spec = np.loadtxt(emissivity_file)
+            if(len(emiss_spec[:,0]) != len(self.wavenumbers) or np.max(emiss_spec[:,0]-self.wavenumbers)>0.1):
+                print("Warning: Emissivity spectrum file wavenumbers do not match scattering files!")
+            self.emiss_base = emiss_spec[:,1]
         #Determine TIR wavenumber range for uniform properties case
         if(self.uniform_props):
             #Set wavenumber range for averaging TIR optical properties for making a smooth planck function. 
@@ -239,6 +243,7 @@ class DisortRTESolver:
         else:
             file = self.cfg.wn_bounds
         wn_bounds = np.loadtxt(file)
+        wn_bounds = np.sort(wn_bounds)
         if(len(wn_bounds) != len(self.wavenumbers)+1):
             raise ValueError(f"Expected {len(self.wavenumbers)+1} wavenumber bounds, got {len(wn_bounds)} from {file}.")
         lower_bounds = wn_bounds[:-1].tolist()  # lower edge for each bin
@@ -265,11 +270,12 @@ class DisortRTESolver:
         # ttemp  = torch.zeros(n_cols)
 
         if(self.cfg.multi_wave):
-            #fbeam = torch.tensor(self.solar*F).unsqueeze(1) #Solar flux integrated within each wavenumber band. 
-            if self.n_cols==1:
-                self.fbeam[:] = torch.from_numpy(self.solar*F)[:,None]
-            else:
-                self.fbeam[:] = torch.from_numpy(np.tile(self.solar[:,None],(1,self.n_cols))*np.tile(F,(self.nwave,1)))
+            #fbeam = torch.tensor(self.solar*F).unsqueeze(1) #Solar flux integrated within each wavenumber band.
+            if np.any(F>0): 
+                if self.n_cols==1:
+                    self.fbeam[:] = torch.from_numpy(self.solar*F)[:,None]
+                else:
+                    self.fbeam[:] = torch.from_numpy(np.tile(self.solar[:,None],(1,self.n_cols))*np.tile(F,(self.nwave,1)))
             #temis = torch.full([len(self.wavenumbers)],1.0).unsqueeze(1)
             #if Q==None: 
                 #fisot = torch.tensor(np.zeros_like(self.wavenumbers)).unsqueeze(1)

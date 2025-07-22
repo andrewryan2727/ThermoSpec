@@ -386,8 +386,8 @@ class Simulator:
 			#The calculation of radiances is slower, hence we only do it at the end with our output temperature profiles. 
 			#This will trigger the loading of new optical constants files for multi-wave, which optionally can 
 			# be at a higher spectral resolution. 
-			self.rte_disort = DisortRTESolver(self.cfg, self.grid,planck=True,output_radiance=True)
-			self.rte_disort_vis = DisortRTESolver(self.cfg, self.grid,planck=False,output_radiance=True)
+			self.rte_disort = DisortRTESolver(self.cfg, self.grid,planck=True,output_radiance=True,observer_mu = self.cfg.observer_mu)
+			self.rte_disort_vis = DisortRTESolver(self.cfg, self.grid,planck=False,output_radiance=True,observer_mu = self.cfg.observer_mu)
 			if(self.cfg.multi_wave):
 				nwave = len(self.rte_disort.wavenumbers)
 				self.radiance_out = np.zeros((nwave,self.T_out.shape[1]))
@@ -396,7 +396,7 @@ class Simulator:
 				self.radiance_out_therm = np.zeros(self.T_out.shape[1])
 				self.radiance_out_vis = np.zeros(self.T_out.shape[1])
 			self.rad_T_out = np.zeros(self.T_out.shape[1])  #Temperature computed from radiance blackbody fit. 
-			wn_bounds = np.loadtxt(self.cfg.wn_bounds_out)
+			wn_bounds = np.sort(np.loadtxt(self.cfg.wn_bounds_out))
 			print("Computing DISORT radiance spectra for output.")
 			for idx in range(self.T_out.shape[1]):
 				if non_diurnal:
@@ -441,7 +441,7 @@ class Simulator:
 			
 			# Calculate observer radiance for each output time
 			for idx in range(len(self.t_out)):
-				print(f"Time {idx} of {len(self.t_out)}...")
+				print(f"Time {idx+1} of {len(self.t_out)}...")
 				if non_diurnal:
 					F = self.F_steady
 					mu_sun = self.mu_steady
@@ -458,17 +458,45 @@ class Simulator:
 				else:
 					T_crater_time = self.T_crater_out[:, :, idx]  # [depth, n_facets]
 				
+				# Calculate scattered energy parameters for observer radiance calculation
+				sun_vec = None
+				crater_radtrans = None
+				therm_flux_facets = None
+				illuminated = None
+				
+				# Get sun vector if available
+				if not self.cfg.diurnal and hasattr(self, 'sun_x_steady') and hasattr(self, 'sun_y_steady') and hasattr(self, 'sun_z_steady'):
+					sun_vec = np.array([self.sun_x_steady, self.sun_y_steady, self.sun_z_steady])
+				elif self.cfg.diurnal and hasattr(self, 'sun_x') and hasattr(self, 'sun_y') and hasattr(self, 'sun_z'):
+					# For diurnal case, use F_idx from above
+					if 'F_idx' in locals() and F_idx < len(self.sun_x):
+						sun_vec = np.array([self.sun_x[F_idx], self.sun_y[F_idx], self.sun_z[F_idx]])
+				
+				# Use crater radiative transfer object if available
+				if hasattr(self, 'crater_radtrans'):
+					crater_radtrans = self.crater_radtrans
+					
+				# Use thermal flux if available
+				if hasattr(self, 'flux_therm_crater'):
+					therm_flux_facets = self.flux_therm_crater
+					
+				# Use illuminated facets if available  
+				if hasattr(self, 'illuminated'):
+					illuminated = self.illuminated
+				
 				# Calculate radiance for all observers
 				observer_radiances = self.observer_radiance_calc.compute_all_observers(
-					T_crater_time, self.crater_mesh, self.crater_shadowtester, mu_sun, F
+					T_crater_time, self.crater_mesh, self.crater_shadowtester, mu_sun, F,
+					sun_vec, crater_radtrans, therm_flux_facets, illuminated, 
+					self.crater_albedo, self.crater_emissivity
 				)
 				
 				# Store results
 				if self.cfg.use_RTE and self.cfg.RTE_solver == 'disort' and self.cfg.multi_wave:
-					# observer_radiances shape: [n_observers, n_waves]
+					# observer_radiances shape: [n_observers, n_waves, n_times]
 					self.observer_radiance_out[:, :, idx] = observer_radiances
 				else:
-					# observer_radiances shape: [n_observers]  
+					# observer_radiances shape: [n_observers, n_times]  
 					self.observer_radiance_out[:, idx] = observer_radiances
 
 
@@ -564,17 +592,21 @@ class Simulator:
 						#Initialize initial upwards thermal flux for all crater facets used in self-heating calculations. 
 						self.flux_therm_crater = np.full(self.n_facets,therm_flux_up)
 					elif(self.cfg.RTE_solver == 'disort'):
-						_,flux_up_therm = self.rte_disort.disort_run(self.T,1.0,1.0)
-						_,flux_up_vis = self.rte_disort_vis.disort_run(self.T,1.0,1.0)
+						_,flux_up_therm = self.rte_disort.disort_run(self.T,0.,0.)
+						if(self.cfg.sun):
+							_,flux_up_vis = self.rte_disort_vis.disort_run(self.T,1.0,1.0)
 						if self.cfg.multi_wave:
 							#Determine wavelength-dependent vis reflectance and thermal emissivity 
 							vis_range = self.rte_disort.wavenumbers>3333
 							therm_range = self.rte_disort.wavenumbers<=3333
 							nwaves = len(self.rte_disort.wavenumbers)
-							albedo = np.zeros_like(self.rte_disort.wavenumbers)
-							albedo[vis_range] = (flux_up_vis[vis_range,0] / self.rte_disort.solar[vis_range])
+							if(self.cfg.sun):
+								albedo = np.zeros_like(self.rte_disort.wavenumbers)
+								albedo[vis_range] = (flux_up_vis[vis_range,0] / self.rte_disort.solar[vis_range])
+							else:
+								albedo = 0.0
 							emissivity = np.zeros_like(self.rte_disort.wavenumbers)
-							wn_bounds = np.loadtxt(self.cfg.wn_bounds)[:sum(therm_range)+1]
+							wn_bounds = np.sort(np.loadtxt(self.cfg.wn_bounds))[:sum(therm_range)+1]
 							planck_btemp = np.zeros(np.sum(therm_range))
 							for i in np.arange(np.sum(therm_range)):
 								planck_btemp[i] = planck_wn_integrated(wn_bounds[i:i+2], self.cfg.T_bottom)
@@ -585,9 +617,15 @@ class Simulator:
 							self.flux_therm_crater = np.tile(flux_up_therm[:,0],(self.n_facets,1))
 							self.flux_therm_crater[:,vis_range] = 0.0 
 						else:
-							albedo = np.array(flux_up_vis) / self.cfg.J
+							if(self.cfg.sun):
+								albedo = np.array(flux_up_vis) / self.cfg.J
+							else:
+								albedo = 0.0
 							emissivity = np.array(flux_up_therm)/(self.cfg.sigma*self.cfg.T_bottom**4.)
 							self.flux_up_therm = np.full(self.n_facets, flux_up_therm)
+					# Store albedo and emissivity as instance variables for observer radiance calculation
+					self.crater_albedo = albedo
+					self.crater_emissivity = emissivity
 					print("Crater effective albedo and emissivity: " + str(albedo) + " " + str(emissivity))
 					#Configure flux_up arrays for calculating brigthness temperature
 				elif j==0: 
@@ -596,6 +634,9 @@ class Simulator:
 					nwaves = 1
 					albedo = self.cfg.albedo
 					emissivity = self.cfg.em
+					# Store albedo and emissivity as instance variables for observer radiance calculation
+					self.crater_albedo = albedo
+					self.crater_emissivity = emissivity
 					self.flux_up_therm = np.full(self.n_facets,emissivity*self.cfg.sigma*self.T[0]**4.)
 				if j > 0:
 					#sun vector (pointing towards sun)
@@ -662,7 +703,6 @@ class Simulator:
 					else:
 						for i in np.arange(len(self.T_surf_crater)):
 							if self.cfg.use_RTE:
-								#Calculate mu
 								if(self.cfg.RTE_solver == 'hapke'):
 									# Use proper solar incidence angle for this facet
 									source_term, self.phi_vis_prev_crater[:,i], self.phi_therm_prev_crater[:,i] = self.rte_hapke.compute_source(
@@ -670,24 +710,6 @@ class Simulator:
 										self.mu_solar_facets[i], self.illuminated[i], Q_therm=Q_selfheat[i], Q_vis=Q_scat[i])
 									#Calculate flux up from equation that phi = (up+down)/2, where down is the Q_therm from above. Multiply by pi as usual to convert from Hapke convention to flux in W/m2
 									self.flux_therm_crater[i] = (self.phi_therm_prev_crater[0,i]*2 - Q_selfheat[i])*np.pi
-								# elif(self.cfg.RTE_solver == 'disort'):
-								# 	#TO DO: pydisort can accept multiple sims as once as "columns." This should be tested for speed, rather than looping as we are doing here. 
-								# 	if(self.cfg.multi_wave):
-								# 		#Physics not yet properly implemented. Scattering and self-heating need to be calculated for each band. Otherwise we are blowing things up. 
-								# 		source_term, flux_up = self.rte_disort.disort_run(self.T_crater[:,i],cosines[i],self.F, Q = Q_selfheat[i]+Q_scat[i])
-								# 		source_term_vis = np.zeros_like(source_term)
-								# 		self.flux_therm_crater[i] = torch.sum(flux_up[therm_range])
-								# 	else:
-								# 		#In the standard two-wave mode, run disort again for thermal and visible portion of the spectrum. 
-								# 		source_term, self.flux_therm_crater[i] = self.rte_disort.disort_run(self.T_crater[:,i],cosines[i],self.F, Q = Q_selfheat[i])
-								# 		# if(i==1):
-								# 		# 	plt.plot(source_term)
-								# 		if(Q_scat[i]>1.0e-2):
-								# 			#Passing illuminated fraction in place of F here to appropriated adjust the incident solar intensity. 
-								# 			#Some facets aren't directly illuminated but see indirect scattered sunlight, so we run for those cases here too. 
-								# 			source_term_vis,_ = self.rte_disort_vis.disort_run(self.T_crater[:,i],cosines[i],self.illuminated[i], Q = Q_scat[i])
-								# 		else:
-								# 			source_term_vis = 0.0
 							# Advance heat equation with solve_banded (must be looped)
 							self.T_crater[:,i] = self._fd1d_heat_implicit_diag(self.T_crater[:,i],source_term+source_term_vis)
 					#Apply boundary conditions, which is vectorized and doesn't require a loop. 
@@ -711,7 +733,7 @@ class Simulator:
 
 
 			# Terminate here for fixed temperature run, saving outputs at initialization temperature. Useful for spectroscopy. 
-			if(self.cfg.T_fixed and not self.cfg.diurnal):
+			if(self.cfg.T_fixed and not self.cfg.diurnal and j>0):
 				break
 
 			# Steady-state convergence check (only if diurnal=False)
@@ -768,7 +790,7 @@ class Simulator:
 	def disort_emissivity(self):
 		#Runs disort with uniform_props flag, which averages out all spectral properties (extinction and scattering properties)
 		# for the purpose of producing an equivalent but spectrally smooth radiance spectrum for the emissivity division. 
-		rte_disort = DisortRTESolver(self.cfg, self.grid,planck=True,output_radiance=True, uniform_props = True)
+		rte_disort = DisortRTESolver(self.cfg, self.grid,planck=True,output_radiance=True, uniform_props = True,observer_mu = self.cfg.observer_mu)
 		if(self.cfg.multi_wave):
 			nwave = len(rte_disort.wavenumbers)
 			self.radiance_out_uniform = np.zeros((nwave,self.T_out.shape[1]))
@@ -834,9 +856,14 @@ def fit_blackbody_wn_banded(sim,wn_edges, radiance,idx=-1):
 		mask = (radiance > 0) & (B > 0)
 		return np.sum((np.log(radiance[mask]) - np.log(B[mask]))**2)
 	T0 = sim.T_out[1,idx]
-	if sim.T_crater_out is not None:
-		minbound = sim.T_crater_out[:,:,idx].min()-5
-		maxbound = sim.T_crater_out[:,:,idx].max()+5
+	if hasattr(sim, 'T_crater_out'):
+		if np.ndim(sim.T_crater_out) ==2:
+			#steady state run. T_crater_out doesn't have a third dimension, which otherwise would be time. 
+			minbound = sim.T_crater_out.min()-5
+			maxbound = sim.T_crater_out.max()+5
+		else:
+			minbound = sim.T_crater_out[:,:,idx].min()-5
+			maxbound = sim.T_crater_out[:,:,idx].max()+5
 	else:
 		minbound = sim.T_out[:,idx].min()-5
 		maxbound = sim.T_out[:,idx].max()+5
@@ -1149,7 +1176,7 @@ def plot_observer_emissivity_spectra_interactive(observer_radiance_out, observer
 	for t_idx in range(n_times):
 		for obs_idx in range(n_observers):
 			# Read bin edges from config
-			wn_bounds = np.loadtxt(sim.cfg.wn_bounds_out)
+			wn_bounds = np.sort(np.loadtxt(sim.cfg.wn_bounds_out))
 			T_fit, B_fit, emiss_spec, wn_BB = fit_blackbody_wn_banded(sim,wn_bounds, observer_radiance_out[obs_idx, :, t_idx],idx=t_idx)
 			idx1 = np.argmin(np.abs(wavenumbers - 900))
 			idx2 = np.argmin(np.abs(wavenumbers - 1200))
@@ -1320,25 +1347,35 @@ if __name__ == "__main__":
 		final_rad = sim.radiance_out[:, -1]  # Final time step
 		ir_cutoff = np.argmin(np.abs(wn - 1500))  # cm^-1, cutoff for IR bands
 		# Read bin edges from config
-		wn_bounds = np.loadtxt(sim.cfg.wn_bounds_out)
+		wn_bounds = np.sort(np.loadtxt(sim.cfg.wn_bounds_out))
 		T_fit, B_fit, emiss_spec, wn_BB = fit_blackbody_wn_banded(sim,wn_bounds, final_rad)
-		#multi_T_fit, abund, multi_B_fit, multi_emiss_spec, multi_wn_BB= fit_blackbody_mixture_wn_banded(sim,wn_bounds, final_rad)
-		otes_samp = np.loadtxt(sim.cfg.substrate_spectrum_out)
-		otesT1 = np.loadtxt(sim.cfg.otesT1_out)
-		otesT2 = np.loadtxt(sim.cfg.otesT2_out)
-		idx1 = np.argmin(np.abs(otesT1[:,0] - 900))
-		idx2 = np.argmin(np.abs(otesT1[:,0] - 1200))
-		otes_cf_emis = otesT1[idx1:idx2,1].max()
-		bbfit_cf_emis = emiss_spec[idx1:idx2].max()
+		substrate = np.loadtxt(sim.cfg.substrate_spectrum_out)
+		#otesT1 = np.loadtxt(sim.cfg.otesT1_out)
+		#otesT2 = np.loadtxt(sim.cfg.otesT2_out)
+		idx1 = np.argmin(np.abs(wn - 900))
+		idx2 = np.argmin(np.abs(wn - 1200))
+		#otes_cf_emis = otesT1[idx1:idx2,1].max()
+		#bbfit_cf_emis = emiss_spec[idx1:idx2].max()
 		ds_cf_emis = (final_rad/sim.radiance_out_uniform[:, -1])[idx1:idx2].max()
-		samp_cf_emis = otes_samp[idx1:idx2,1].max()
+		#samp_cf_emis = otes_samp[idx1:idx2,1].max()
+		idx1 = np.argmin(np.abs(substrate[:,0] - 1200))
+		idx2 = np.argmin(np.abs(substrate[:,0] - 900))
+		substrate_cf = substrate[idx1:idx2,1].max()
 		plt.figure()
 		#plt.plot(wn_BB, emiss_spec + otes_cf_emis - bbfit_cf_emis, label=f'Emissivity (T_fit={T_fit:.1f} K)')
 		#plt.plot(multi_wn_BB, multi_emiss_spec, label=f'Mixture Emissivity (T_fit={multi_T_fit})')
-		plt.plot(wn[:ir_cutoff], (final_rad/sim.radiance_out_uniform[:, -1])[:ir_cutoff]+otes_cf_emis - ds_cf_emis, label='DISORT emissivity',linewidth=3)
-		plt.plot(wn[:ir_cutoff], otes_samp[:ir_cutoff,1]+otes_cf_emis - samp_cf_emis, label='Substrate spectrum (Orgueil)',linewidth=1)
-		plt.plot(wn[:ir_cutoff], otesT1[:ir_cutoff,1], label='OTES T1 (fewer fines)')
-		plt.plot(wn[:ir_cutoff], otesT2[:ir_cutoff,1], label='OTES T2 (more fines)')
+		plt.plot(wn[:ir_cutoff], (final_rad/sim.radiance_out_uniform[:, -1])[:ir_cutoff]+1-ds_cf_emis, label='DISORT emissivity',linewidth=2)
+		plt.plot(substrate[:,0], substrate[:,1]+1-substrate_cf, label='Sabel Enstatite',linewidth=1)
+		if(sim.cfg.crater):
+			final_rad_crater = sim.observer_radiance_out[0,:,0] #[observation_angle, wavelengths, time]
+			T_fit, B_fit, emiss_spec, wn_BB = fit_blackbody_wn_banded(sim,wn_bounds, final_rad_crater,idx=0)
+			print(T_fit)
+			idx1 = np.argmin(np.abs(wn_BB - 900))
+			idx2 = np.argmin(np.abs(wn_BB - 1200))
+			ds_cf_emis = emiss_spec[idx1:idx2].max()
+			plt.plot(wn_BB, emiss_spec+1-ds_cf_emis, label='DISORT crater emissivity',linewidth=2)
+		#plt.plot(wn[:ir_cutoff], otesT1[:ir_cutoff,1], label='OTES T1 (fewer fines)')
+		#plt.plot(wn[:ir_cutoff], otesT2[:ir_cutoff,1], label='OTES T2 (more fines)')
 		plt.xlabel('Wavenumber [cm$^{-1}$]')
 		plt.ylabel('Emissivity')
 		plt.title('Final Emissivity Spectrum (Radiance / Best-fit Blackbody, band-integrated)')
@@ -1368,8 +1405,3 @@ if __name__ == "__main__":
 				plot_observer_radiance_time_series(sim.observer_radiance_out, 
 												  sim.cfg.observer_vectors, 
 												  sim.t_out, sim.cfg)
-			else:
-				# For non-diurnal cases, show the existing 3D crater radiance viewer
-				print("Displaying interactive crater radiance viewer...")
-				interactive_crater_radiance_viewer(sim.crater_mesh, sim.observer_radiance_out, 
-												 sim.cfg.observer_vectors, sim.t_out, sim.cfg)
