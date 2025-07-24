@@ -8,7 +8,7 @@ from scipy.interpolate import interpn
 
 
 class DisortRTESolver:
-    def __init__(self, config: SimulationConfig, grid: LayerGrid, n_cols = 1, output_radiance=False, uniform_props=False,planck=True, observer_mu=1.0, observer_phi=0.0):
+    def __init__(self, config: SimulationConfig, grid: LayerGrid, n_cols = 1, output_radiance=False, uniform_props=False,planck=True, observer_mu=1.0, observer_phi=0.0, solver_mode=None, spectral_component=None):
         self.cfg = config
         self.grid = grid
         self.output_radiance = output_radiance
@@ -17,11 +17,22 @@ class DisortRTESolver:
         self.n_cols = n_cols
         self.observer_mu = observer_mu
         self.observer_phi = observer_phi
+        
+        # New mode parameters
+        self.solver_mode = solver_mode
+        self.spectral_component = spectral_component
+        
+        # Determine effective mode for this instance
+        self._determine_effective_mode()
+        
         #For multi-wavelength cases, load optical and solar constants from files
-        if(self.cfg.multi_wave):
+        if(self.is_multi_wave):
             self._load_constants()
+            if self.effective_mode == 'hybrid_thermal':
+                self._filter_thermal_wavelengths()
+                
         #Construct optical properties tensors
-        if(self.cfg.multi_wave or self.cfg.depth_dependent):
+        if(self.is_multi_wave or self.cfg.depth_dependent):
             #More complicated set up for multiple wavelengths and/or depth-dependent properties
             self.prop = self._setup_optical_properties_advanced() 
         else:
@@ -29,7 +40,7 @@ class DisortRTESolver:
             self.prop = self._setup_optical_properties() 
         self.op = self._setup_disort_options() #Initialize disort options
         self.ds = Disort(self.op) #initialize disort
-        if(self.cfg.multi_wave):
+        if(self.is_multi_wave):
             nwave = len(self.wavenumbers)
         else:
             nwave = 1
@@ -43,6 +54,71 @@ class DisortRTESolver:
         self.temis = torch.ones((nwave,n_cols)) #Top emissivity (space). Stays at 1. 
         self.btemp = torch.zeros(n_cols)
         self.ttemp  = torch.zeros(n_cols) #Space temperature. Stays at 0. 
+
+    def _determine_effective_mode(self):
+        """Determine the effective operating mode for this DISORT instance."""
+        # If solver_mode is explicitly provided, use it
+        if self.solver_mode is not None:
+            if self.solver_mode == 'hybrid':
+                if self.spectral_component == 'thermal_only':
+                    self.effective_mode = 'hybrid_thermal'
+                    self.is_multi_wave = True
+                    self.should_load_solar_spectrum = False  # Thermal-only doesn't need solar spectrum
+                elif self.spectral_component == 'visible_only':
+                    self.effective_mode = 'hybrid_visible'
+                    self.is_multi_wave = False
+                    self.should_load_solar_spectrum = False  # Visible-only uses cfg.J
+                else:
+                    raise ValueError("Hybrid mode requires spectral_component to be 'thermal_only' or 'visible_only'")
+            elif self.solver_mode == 'multi_wave':
+                self.effective_mode = 'multi_wave'
+                self.is_multi_wave = True
+                self.should_load_solar_spectrum = True  # Multi-wave needs solar spectrum
+            elif self.solver_mode == 'two_wave':
+                self.effective_mode = 'two_wave'
+                self.is_multi_wave = False
+                self.should_load_solar_spectrum = False  # Two-wave uses cfg.J
+            else:
+                raise ValueError(f"Unknown solver_mode: {self.solver_mode}")
+        else:
+            # Legacy mode: determine from existing logic
+            if self.cfg.multi_wave:
+                self.effective_mode = 'multi_wave'
+                self.is_multi_wave = True
+                self.should_load_solar_spectrum = True  # Legacy multi-wave needs solar spectrum
+            else:
+                self.effective_mode = 'two_wave'
+                self.is_multi_wave = False
+                self.should_load_solar_spectrum = False  # Legacy two-wave uses cfg.J
+    
+    def _filter_thermal_wavelengths(self):
+        """Filter loaded constants to thermal wavelengths only (for hybrid_thermal mode)."""
+        if not hasattr(self, 'wavenumbers'):
+            raise ValueError("Cannot filter wavelengths: constants not loaded yet")
+            
+        # Convert cutoff wavelength to wavenumber
+        cutoff_wn = 10000.0 / self.cfg.hybrid_wavelength_cutoff  # Convert μm to cm-1
+        thermal_mask = self.wavenumbers <= cutoff_wn
+        
+        if not any(thermal_mask):
+            raise ValueError(f"No thermal wavelengths found below cutoff {self.cfg.hybrid_wavelength_cutoff} μm")
+            
+        # Filter all wavelength-dependent arrays
+        self.wavenumbers = self.wavenumbers[thermal_mask]
+        self.g_array = self.g_array[thermal_mask]
+        self.Cext_array = self.Cext_array[thermal_mask]
+        self.Csca_array = self.Csca_array[thermal_mask]
+        self.ssalb_array = self.ssalb_array[thermal_mask]
+        
+        # Filter solar spectrum if it exists
+        if hasattr(self, 'solar'):
+            self.solar = self.solar[thermal_mask]
+            
+        # Filter emissivity spectrum if it exists
+        if hasattr(self, 'emiss_base'):
+            self.emiss_base = self.emiss_base[thermal_mask]
+            
+        #print(f"Hybrid thermal mode: filtered to {len(self.wavenumbers)} thermal wavelengths (< {self.cfg.hybrid_wavelength_cutoff} μm)")
 
     def _load_constants(self):
         #self.wavenumbers, self.ssalb_array, self.Cext_array, self.Csca_array, self.Cabs_array, self.alpha1_array = load_mie_folder(self.cfg.folder,self.config.nmom)
@@ -61,7 +137,10 @@ class DisortRTESolver:
         self.Cext_array = mie_params[sortidx,2]
         self.Csca_array = mie_params[sortidx,3]
         self.ssalb_array = mie_params[sortidx,4]
-        if self.cfg.diurnal or self.cfg.sun:
+        # Load solar spectrum only if we need spectral solar data
+        # In hybrid mode, thermal-only solvers don't need solar spectrum (no visible wavelengths)
+        # In hybrid mode, visible-only solvers shouldn't be multi-wave (use cfg.J instead)
+        if (self.cfg.diurnal or self.cfg.sun) and self.should_load_solar_spectrum:
             #Load multi-wave solar flux file. 
             solar_array = np.loadtxt(solar_file)
             if(len(solar_array[:,0]) != len(self.wavenumbers) or np.max(solar_array[:,0]-self.wavenumbers)>0.1):
@@ -115,7 +194,7 @@ class DisortRTESolver:
            Handles wavelength-dependent and/or depth-dependent scenarios
            Must specify input file paths in config file."""
         n_layers = len(self.grid.x_RTE) 
-        n_waves = len(self.wavenumbers) if self.cfg.multi_wave else 1
+        n_waves = len(self.wavenumbers) if self.is_multi_wave else 1
         n_mom = self.cfg.nmom 
         n_cols = self.n_cols #number of columns. Always 1 unless we add variations in the future for different properties but at the same wavelength. 
 
@@ -148,7 +227,7 @@ class DisortRTESolver:
                 #     ], dim=-1)  # (n_layers, n_mom)
             else:
                 # Uniform properties with depth
-                if self.cfg.multi_wave:
+                if self.is_multi_wave:
                     #Calculate dtau at this wavelength using the extinction cross section Cext
                     node_depth_meters = (self.grid.x_RTE/self.cfg.Et) #depth at center of each layer. 
                     Vp = (4./3.)*np.pi*self.cfg.radius**3. #particle volume, m^3
@@ -210,8 +289,16 @@ class DisortRTESolver:
             op.ds().nmom = self.cfg.nmom_out
             op.ds().nstr = self.cfg.nstr_out
             op.ds().nphase = self.cfg.nmom_out
-            op.user_mu(np.array([self.observer_mu])) #Specify zenith angle for measuring intensity
-            op.user_phi(np.array([self.observer_phi])) #Specify azimuth angle for measuring intensity. 
+            # Handle both scalar and array inputs for observer angles
+            if hasattr(self.observer_mu, '__len__'):
+                op.user_mu(np.array(self.observer_mu)) #Array of zenith angles for measuring intensity
+            else:
+                op.user_mu(np.array([self.observer_mu])) #Single zenith angle for measuring intensity
+            
+            if hasattr(self.observer_phi, '__len__'):
+                op.user_phi(np.array(self.observer_phi)) #Array of azimuth angles for measuring intensity
+            else:
+                op.user_phi(np.array([self.observer_phi])) #Single azimuth angle for measuring intensity 
         else:
             if self.planck:
                 op.flags("lamber,quiet,onlyfl,intensity_correction,planck")
@@ -220,7 +307,7 @@ class DisortRTESolver:
             op.ds().nmom = self.cfg.nmom
             op.ds().nstr = self.cfg.nstr
             op.ds().nphase = self.cfg.nmom
-        if(self.cfg.multi_wave):
+        if self.is_multi_wave:
             self.lower_wns, self.upper_wns = self._compute_wn_bounds()
             self.wn_bin_widths = np.array(self.upper_wns) - np.array(self.lower_wns)
             self.wn_bins = np.append(self.lower_wns,self.upper_wns[-1])
@@ -230,7 +317,7 @@ class DisortRTESolver:
             #Broadband. Define range for planck function to a very wide range. 
             op.wave_lower([20]) #500 µm
             op.wave_upper([10000]) #1 µm
-        n_waves = len(self.wavenumbers) if self.cfg.multi_wave else 1
+        n_waves = len(self.wavenumbers) if self.is_multi_wave else 1
         op.nwave(n_waves)
         op.ncol(self.n_cols)
         op.ds().nlyr = len(self.grid.x_RTE)
@@ -258,6 +345,13 @@ class DisortRTESolver:
 
         #Account for some crater shadow cases where the sun is up but the facet is not illuminated. 
         F *= mu > 0.001
+        if self.n_cols > 1:
+            if not hasattr(F, 'shape'):
+                #If F is a scalar, convert to array with n_cols elements
+                F = np.full(self.n_cols, F )
+            if not hasattr(mu, 'shape'):
+                #If mu is a scalar, convert to array with n_cols elements
+                mu = np.full(self.n_cols, mu )
 
         #Initialization state and dimensions of boundary condition arrays. 
         # umu0 = torch.zeros(n_cols)
@@ -269,16 +363,26 @@ class DisortRTESolver:
         # btemp = torch.zeros(n_cols)
         # ttemp  = torch.zeros(n_cols)
 
-        if(self.cfg.multi_wave):
+        if self.is_multi_wave:
             #fbeam = torch.tensor(self.solar*F).unsqueeze(1) #Solar flux integrated within each wavenumber band.
             if np.any(F>0): 
-                if self.n_cols==1:
-                    self.fbeam[:] = torch.from_numpy(self.solar*F)[:,None]
+                if hasattr(self, 'solar'):
+                    # Use loaded solar spectrum (multi-wave mode)
+                    if self.n_cols==1:
+                        self.fbeam[:] = torch.from_numpy(self.solar*F)[:,None]
+                    else:
+                        self.fbeam[:] = torch.from_numpy(np.tile(self.solar[:,None],(1,self.n_cols))*np.tile(F,(self.nwave,1)))
                 else:
-                    self.fbeam[:] = torch.from_numpy(np.tile(self.solar[:,None],(1,self.n_cols))*np.tile(F,(self.nwave,1)))
+                    # No solar spectrum loaded (e.g., hybrid thermal mode) - use broadband approximation
+                    if self.n_cols==1:
+                        self.fbeam[:] = F * self.cfg.J / self.nwave  # Distribute broadband flux evenly
+                    else:
+                        self.fbeam[:] = torch.from_numpy(np.tile((F * self.cfg.J / self.nwave)[None,:],(self.nwave,1)))
             #temis = torch.full([len(self.wavenumbers)],1.0).unsqueeze(1)
             #if Q==None: 
                 #fisot = torch.tensor(np.zeros_like(self.wavenumbers)).unsqueeze(1)
+            else:
+                self.fbeam*=0.0
             if np.any(Q != None):
                 #fisot = torch.tensor(Q).unsqueeze(1)
                 #For now passing global value. TO DO: update to wavelength-dependent later.
@@ -288,7 +392,7 @@ class DisortRTESolver:
                     #only works if Q array is size [n_waves]
                     self.fisot[:] = torch.from_numpy(Q)[:,None]
                 else:
-                    self.fisot[:] = torch.from_numpy(Q.swapaxes(0,1))
+                    self.fisot[:] = torch.from_numpy(Q)
             if(self.cfg.use_spec and not self.uniform_props):
                 #albedo = torch.tensor(1.0 - self.emiss_base).unsqueeze(1) #Albedo spectrum for the bottom boundary.
                 self.albedo[:] = torch.from_numpy(1.0 - self.emiss_base)[:,None] #emiss_base must have same dimensions as n_wave. 
@@ -319,7 +423,7 @@ class DisortRTESolver:
             if(self.n_cols>1):
                 self.btemp[:] = torch.from_numpy(T[-1,:])
                 if(np.any(T[-1,:]<0)):
-                    print('hi')
+                    print('Negative temperatures passed to disort. Aborting run.')
                     return
             else:
                 self.btemp.fill_(T[-1])
@@ -332,7 +436,10 @@ class DisortRTESolver:
         
         # Set solar incidence angles
         if(self.n_cols>1):
-            self.umu0[:] = torch.from_numpy(mu)
+            if hasattr(mu,'shape'):
+                self.umu0[:] = torch.from_numpy(mu)
+            else:
+                self.umu0.fill_(mu)
             # Set solar azimuth angles if provided
             if phi is not None:
                 self.phi0[:] = torch.from_numpy(phi)
@@ -372,7 +479,7 @@ class DisortRTESolver:
 
         #Run disort. Result returns up and down total fluxes. 
         result = self.ds.forward(self.prop,'', T_tensor, **bc)
-        if(self.cfg.multi_wave):
+        if self.is_multi_wave:
             fl_up = result[:,:,0,0].numpy() #total upwards diffuse flux from top layer, for rough surface scattering modeling. 
         else:
             fl_up = result[0,:,0,0].numpy()
@@ -394,12 +501,12 @@ class DisortRTESolver:
         #Q_rad = np.diff(F_net.numpy()) / self.grid.dtau
         if(self.output_radiance):
             #Just return the radiance as viewed by the observer, currently fixed at zenith. 
-            rad = self.ds.gather_rad() #rad[nwave,ncol,ndepth,n_obs_direction mu, phi]
-            return(rad[:,:,0,0,0])
+            rad = self.ds.gather_rad() #rad[nwave,ncol,ndepth,n_obs_direction mu, n_obs_direction phi]
+            return(rad[:,:,0,:,:])
         else:
             #Get flux divergence. 
             flx = self.ds.gather_flx() #flx[nwave,ncol,ndepth,8 properties] See table above for list of properties. 
-            if(self.cfg.multi_wave):
+            if self.is_multi_wave:
                 #Summation of values from different wavelength bins
                 flux_divergence = flx[:,:,:,3]
                 Q_rad = torch.sum(flux_divergence,dim=0)

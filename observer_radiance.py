@@ -96,13 +96,15 @@ class ObserverRadianceCalculator:
         """
         disort_thermal = DisortRTESolver(self.cfg, self.grid, n_cols=1,
                                        output_radiance=True, planck=True,
-                                       observer_mu=mu, observer_phi=phi)
+                                       observer_mu=mu, observer_phi=phi, solver_mode=self.cfg.output_radiance_mode, spectral_component='thermal_only')
         
         disort_vis = None
-        if not self.cfg.multi_wave:
-            disort_vis = DisortRTESolver(self.cfg, self.grid, n_cols=1,
-                                       output_radiance=True, planck=False,
-                                       observer_mu=mu, observer_phi=phi)
+        # if self.cfg.output_radiance_mode in ['two_wave', 'hybrid']:
+        #     disort_vis = DisortRTESolver(self.cfg, self.grid, n_cols=1,
+        #                                output_radiance=True, planck=False,
+        #                                observer_mu=mu, observer_phi=phi,
+        #                                solver_mode=self.cfg.output_radiance_mode, 
+        #                                spectral_component='visible_only')
         
         return disort_thermal, disort_vis
     
@@ -141,10 +143,17 @@ class ObserverRadianceCalculator:
         # Get local viewing angles for each facet
         facet_mu, facet_phi = self.compute_facet_observer_angles(crater_mesh, observer_vec)
         
-        # Initialize radiance arrays based on multi_wave mode
-        if self.cfg.multi_wave:
+        # Initialize radiance arrays based on output_radiance_mode
+        if self.cfg.output_radiance_mode == 'multi_wave':
             # We need to get n_waves by creating a temporary DISORT instance
-            temp_disort = DisortRTESolver(self.cfg, self.grid, n_cols=1, output_radiance=True, planck=True)
+            temp_disort = DisortRTESolver(self.cfg, self.grid, n_cols=1, output_radiance=True, planck=True,
+                                        solver_mode=self.cfg.output_radiance_mode)
+            n_waves = len(temp_disort.wavenumbers)
+            total_radiance = np.zeros(n_waves)
+        elif self.cfg.output_radiance_mode == 'hybrid':
+            # Hybrid mode: thermal wavelengths only
+            temp_disort = DisortRTESolver(self.cfg, self.grid, n_cols=1, output_radiance=True, planck=True,
+                                        solver_mode=self.cfg.output_radiance_mode, spectral_component='thermal_only')
             n_waves = len(temp_disort.wavenumbers)
             total_radiance = np.zeros(n_waves)
         else:
@@ -175,73 +184,175 @@ class ObserverRadianceCalculator:
             
         total_projected_area = 0.0
         
-        for i in range(len(crater_mesh.normals)):
-            # Skip facets that are not visible or facing away from observer
-            if visibility[i] <= 0 or facet_mu[i] <= 0:
-                continue
-                
-            # Temperature profile for this facet
-            T_facet = T_crater_facets[:, i]
+        # Performance optimization option: use batch DISORT calculation
+        use_batch_disort = False  # Set to False to use original per-facet method for comparison
+        
+        if use_batch_disort:
+            # NEW METHOD: Single DISORT run with all facet angles
+            print("Using batch DISORT calculation for all facets...")
             
-            # Create DISORT instances for this facet's local viewing angles
-            try:
-                disort_thermal, disort_vis = self.create_disort_for_facet(facet_mu[i], facet_phi[i])
+            # Filter out non-visible facets
+            visible_facets = []
+            visible_mu = []
+            visible_phi = []
+            visible_indices = []
+            
+            for i in range(len(crater_mesh.normals)):
+                if visibility[i] > 0 and facet_mu[i] > 0:
+                    visible_facets.append(i)
+                    visible_mu.append(facet_mu[i])
+                    visible_phi.append(facet_phi[i])
+                    visible_indices.append(i)
+            
+            if len(visible_facets) > 0:
+                # Create temperature array for all visible facets [depth, n_visible_facets]
+                T_visible = T_crater_facets[:, visible_facets]
                 
-                # Get total scattered energy for this facet (Q_scat + Q_selfheat)
-                if n_waves == 1:
-                    Q_vis = Q_scat_facets[i, 0]
-                    Q_therm = Q_selfheat_facets[i, 0]
-                else:
-                    Q_vis = Q_scat_facets[i, :]
-                    Q_therm = Q_selfheat_facets[i, :]
-                Q_total = Q_vis + Q_therm
-
-                
-                # Calculate radiance from this facet using facet-specific DISORT with scattered energy
-                if self.cfg.multi_wave:
-                    # Multi-wave case: return full spectral radiance
-                    radiance = disort_thermal.disort_run(T_facet, mu_sun, F_sun, Q=Q_total)
-                    if hasattr(radiance, 'numpy'):
-                        radiance = radiance.numpy()
-                    # radiance should be shape [n_waves] or [n_waves, 1]
-                    if radiance.ndim > 1:
-                        facet_radiance = radiance[:, 0]  # Take first column if 2D
+                # Create single DISORT instance with all observer angles
+                if self.cfg.output_radiance_mode in ['multi_wave', 'hybrid']:
+                    # Create thermal solver with all observer angles
+                    disort_batch = DisortRTESolver(self.cfg, self.grid, n_cols=len(visible_facets),
+                                                 output_radiance=True, planck=True,
+                                                 observer_mu=np.sort(np.array(visible_mu)), 
+                                                 observer_phi=np.array(visible_phi),
+                                                 solver_mode=self.cfg.output_radiance_mode, 
+                                                 spectral_component='thermal_only')
+                    
+                    # Prepare Q arrays for all visible facets
+                    if n_waves == 1:
+                        Q_therm_batch = np.array([Q_selfheat_facets[i, 0] for i in visible_facets])
+                        Q_vis_batch = np.array([Q_scat_facets[i, 0] for i in visible_facets])
                     else:
-                        facet_radiance = radiance
-                else:
-                    # Two-wave case: thermal + visible, return single value
-                    rad_thermal = disort_thermal.disort_run(T_facet, mu_sun, F_sun, Q=Q_therm)
-                    rad_vis = disort_vis.disort_run(T_facet, mu_sun, F_sun, Q=Q_vis)
+                        Q_therm_batch = Q_selfheat_facets[visible_facets, :].T  # [n_waves, n_facets]
+                        Q_vis_batch = Q_scat_facets[visible_facets, :].T  # [n_waves, n_facets]
                     
-                    if hasattr(rad_thermal, 'numpy'):
-                        rad_thermal = rad_thermal.numpy()
-                    if hasattr(rad_vis, 'numpy'):
-                        rad_vis = rad_vis.numpy()
+                    if self.cfg.output_radiance_mode == 'multi_wave':
+                        Q_total_batch = Q_therm_batch + Q_vis_batch
+                        radiances_batch = disort_batch.disort_run(T_visible, mu_sun, F_sun, Q=Q_total_batch)
+                    else:  # hybrid
+                        radiances_batch = disort_batch.disort_run(T_visible, 0.0, 0.0, Q=Q_therm_batch)
+                    
+                    # Extract radiance for each facet at its corresponding observer angle
+                    # radiances_batch shape: [n_waves, n_facets, n_depth, n_mu, n_phi]
+                    # We want radiance at mu_index=i, phi_index=i for facet i
+                    for idx, facet_i in enumerate(visible_facets):
+                        # Get radiance at surface (depth=0) for this facet's observer angle
+                        if radiances_batch.ndim == 4:  # [n_waves, n_facets, n_depth, n_mu, n_phi]
+                            facet_radiance = radiances_batch[:, idx, idx, idx]  # [n_waves]
+                        elif radiances_batch.ndim == 3:  # [n_facets, n_depth, n_mu, n_phi] for single wave
+                            facet_radiance = radiances_batch[idx, idx, idx]  # scalar
+                        else:
+                            print(f"Unexpected radiance shape: {radiances_batch.shape}")
+                            facet_radiance = np.zeros(n_waves) if n_waves > 1 else 0.0
                         
-                    # Ensure scalar values
-                    rad_thermal = rad_thermal.item() if hasattr(rad_thermal, 'item') else rad_thermal
-                    rad_vis = rad_vis.item() if hasattr(rad_vis, 'item') else rad_vis
-                    facet_radiance = rad_thermal + rad_vis
-                    
-            except Exception as e:
-                print(f"Warning: DISORT failed for facet {i} (mu={facet_mu[i]:.3f}, phi={facet_phi[i]:.3f}): {e}")
-                if self.cfg.multi_wave:
-                    facet_radiance = np.zeros(n_waves)
+                        # Weight by facet area, projected area, and visibility
+                        facet_area = crater_mesh.areas[facet_i]
+                        projected_area = facet_area * facet_mu[facet_i] * visibility[facet_i]
+                        
+                        total_radiance += facet_radiance * projected_area
+                        total_projected_area += projected_area
+                
                 else:
-                    facet_radiance = 0.0
+                    # Two-wave case with batch processing
+                    disort_thermal_batch = DisortRTESolver(self.cfg, self.grid, n_cols=len(visible_facets),
+                                                         output_radiance=True, planck=True,solver_mode=self.cfg.output_radiance_mode,
+                                                         observer_mu=np.array(visible_mu), 
+                                                         observer_phi=np.array(visible_phi),spectral_component='thermal_only')
+                    
+                    Q_therm_batch = np.array([Q_selfheat_facets[i, 0] for i in visible_facets])
+                    radiances_thermal = disort_thermal_batch.disort_run(T_visible, mu_sun, F_sun, Q=Q_therm_batch)
+                    
+                    # Extract radiance for each facet
+                    for idx, facet_i in enumerate(visible_facets):
+                        if radiances_thermal.ndim == 4:  # [n_facets, n_depth, n_mu, n_phi]
+                            facet_radiance = radiances_thermal[idx, 0, idx, idx]
+                        else:
+                            facet_radiance = 0.0
+                        
+                        # Weight by facet area, projected area, and visibility
+                        facet_area = crater_mesh.areas[facet_i]
+                        projected_area = facet_area * facet_mu[facet_i] * visibility[facet_i]
+                        
+                        total_radiance += facet_radiance * projected_area
+                        total_projected_area += projected_area
             
-            # Weight by facet area, projected area (cosine factor), and visibility
-            facet_area = crater_mesh.areas[i]
-            projected_area = facet_area * facet_mu[i] * visibility[i]
-            
-            total_radiance += facet_radiance * projected_area
-            total_projected_area += projected_area
+            print(f"Batch DISORT calculation completed for {len(visible_facets)} visible facets.")
+        
+        else:
+            # ORIGINAL METHOD: Individual DISORT instances for each facet (preserved for comparison)
+            print("Using original per-facet DISORT calculation...")
+            for i in range(len(crater_mesh.normals)):
+                # Skip facets that are not visible or facing away from observer
+                if visibility[i] <= 0 or facet_mu[i] <= 0:
+                    continue
+                    
+                # Temperature profile for this facet
+                T_facet = T_crater_facets[:, i]
+                
+                # Create DISORT instances for this facet's local viewing angles
+                try:
+                    disort_thermal, disort_vis = self.create_disort_for_facet(facet_mu[i], facet_phi[i])
+                    
+                    # Get total scattered energy for this facet (Q_scat + Q_selfheat)
+                    if n_waves == 1:
+                        Q_vis = Q_scat_facets[i, 0]
+                        Q_therm = Q_selfheat_facets[i, 0]
+                    else:
+                        Q_vis = Q_scat_facets[i, :]
+                        Q_therm = Q_selfheat_facets[i, :]
+                    Q_total = Q_vis + Q_therm
+
+                    
+                    # Calculate radiance from this facet using facet-specific DISORT with scattered energy
+                    if self.cfg.output_radiance_mode in ['multi_wave', 'hybrid']:
+                        # Multi-wave or hybrid case: return spectral radiance
+                        if self.cfg.output_radiance_mode == 'multi_wave':
+                            radiance = disort_thermal.disort_run(T_facet, mu_sun, F_sun, Q=Q_total)
+                        else:
+                            # Hybrid mode: thermal wavelengths only, no sun. 
+                            radiance = disort_thermal.disort_run(T_facet, 0.0, 0.0, Q=Q_therm)
+                        if hasattr(radiance, 'numpy'):
+                            radiance = radiance.numpy()
+                        # radiance should be shape [n_waves] or [n_waves, 1]
+                        if radiance.ndim > 1:
+                            facet_radiance = radiance[:, 0,0,0]  # Take first column if 2D
+                        else:
+                            facet_radiance = radiance
+                    else:
+                        # Two-wave case: thermal + visible, return single value
+                        rad_thermal = disort_thermal.disort_run(T_facet, mu_sun, F_sun, Q=Q_therm)
+                        #rad_vis = disort_vis.disort_run(T_facet, mu_sun, F_sun, Q=Q_vis)
+                        
+                        if hasattr(rad_thermal, 'numpy'):
+                            rad_thermal = rad_thermal.numpy()
+                        # if hasattr(rad_vis, 'numpy'):
+                        #     rad_vis = rad_vis.numpy()
+                            
+                        # Ensure scalar values
+                        rad_thermal = rad_thermal.item() if hasattr(rad_thermal, 'item') else rad_thermal
+                        #rad_vis = rad_vis.item() if hasattr(rad_vis, 'item') else rad_vis
+                        facet_radiance = rad_thermal
+                        
+                except Exception as e:
+                    print(f"Warning: DISORT failed for facet {i} (mu={facet_mu[i]:.3f}, phi={facet_phi[i]:.3f}): {e}")
+                    if self.cfg.output_radiance_mode in ['multi_wave', 'hybrid']:
+                        facet_radiance = np.zeros(n_waves)
+                    else:
+                        facet_radiance = 0.0
+                
+                # Weight by facet area, projected area (cosine factor), and visibility
+                facet_area = crater_mesh.areas[i]
+                projected_area = facet_area * facet_mu[i] * visibility[i]
+                
+                total_radiance += facet_radiance * projected_area
+                total_projected_area += projected_area
+            print("Finished individual facet loop.")
         
         # Return area-averaged radiance
         if total_projected_area > 0:
             return total_radiance / total_projected_area
         else:
-            if self.cfg.multi_wave:
+            if self.cfg.output_radiance_mode in ['multi_wave', 'hybrid']:
                 return np.zeros(n_waves)
             else:
                 return 0.0
@@ -271,9 +382,16 @@ class ObserverRadianceCalculator:
                       - For multi_wave: shape [n_observers, n_waves]  
                       - For two-wave: shape [n_observers]
         """
-        if self.cfg.multi_wave:
+        if self.cfg.output_radiance_mode == 'multi_wave':
             # Get number of wavelengths by creating a temporary DISORT instance
-            temp_disort = DisortRTESolver(self.cfg, self.grid, n_cols=1, output_radiance=True, planck=True)
+            temp_disort = DisortRTESolver(self.cfg, self.grid, n_cols=1, output_radiance=True, planck=True,
+                                        solver_mode=self.cfg.output_radiance_mode)
+            n_waves = len(temp_disort.wavenumbers)
+            radiances = np.zeros((len(self.observers), n_waves))
+        elif self.cfg.output_radiance_mode == 'hybrid':
+            # Hybrid mode: thermal wavelengths only
+            temp_disort = DisortRTESolver(self.cfg, self.grid, n_cols=1, output_radiance=True, planck=True,
+                                        solver_mode=self.cfg.output_radiance_mode, spectral_component='thermal_only')
             n_waves = len(temp_disort.wavenumbers)
             radiances = np.zeros((len(self.observers), n_waves))
         else:

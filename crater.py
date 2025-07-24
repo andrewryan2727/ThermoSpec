@@ -239,7 +239,7 @@ class CraterRadiativeTransfer:
         Q_selfheat = np.zeros((n_facets,n_waves))
         for i in range(n_facets):
             idxs = self.selfheating.indices[i]
-            if(n_waves==1):
+            if(therm_flux.ndim == 1):
                 vfs = self.selfheating.view_factors[i]
             else:
                 vfs = self.selfheating.view_factors[i][:,None]
@@ -265,8 +265,11 @@ def compute_multiple_scattered_sunlight(
         if np.allclose(G_new, G, rtol=tol, atol=tol):
             break
         G = G_new
-    F_SCAT = G.copy() 
-    F_SCAT[Alb>0.0] /= Alb[Alb>0.0]
+    F_SCAT = G.copy()
+    if(Alb.shape[1]==F_SCAT.shape[1]): 
+        F_SCAT[Alb>0.0] /= Alb[Alb>0.0]
+    else:
+        F_SCAT /= Alb
     return F_SCAT
 
 def compute_multiple_scattered_sunlight_gs(
