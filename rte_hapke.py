@@ -28,9 +28,9 @@ class RadiativeTransfer:
         if config.RTE_solver == 'hapke':
             # Original 2-stream initialization
             if config.single_layer:
-                self.A_im1, self.A_i, self.A_ip1, self.h0, self.hN = build_bvp_stencil(grid.x, grid.nlay_dust)
+                self.A_im1, self.A_i, self.A_ip1, self.h0, self.hN = build_bvp_stencil(grid.x_boundaries, grid.nlay_dust)
             else:
-                self.A_im1, self.A_i, self.A_ip1, self.h0, self.hN = build_bvp_stencil(grid.x, grid.nlay_dust)
+                self.A_im1, self.A_i, self.A_ip1, self.h0, self.hN = build_bvp_stencil(grid.x_boundaries, grid.nlay_dust)
             A = (self.A_im1, self.A_i, self.A_ip1)
             self.J_vis_ab   = build_jacobian_vis_banded((self.A_im1, self.A_i, self.A_ip1, self.h0, self.hN), config.gamma_vis)
             self.J_therm_ab = build_jacobian_therm_banded((self.A_im1, self.A_i, self.A_ip1, self.h0, self.hN), config.gamma_therm, config.single_layer)
@@ -41,9 +41,8 @@ class RadiativeTransfer:
         self.dphi_vis_prev  = np.zeros(n)
         self.dphi_therm_prev= np.zeros(n)
 
-    def solve_visible(self,phi_vis_prev, T, mu, F, Q_vis):
+    def solve_visible(self,x,phi_vis_prev, T, mu, F, Q_vis):
         #Hapke visible 2-stream RTE solver
-        x = self.grid.x_RTE
         phi_vis_new = solve_bvp_vis(
             x, self._vis_fun, phi_vis_prev,
             self.J_vis_ab, self.A_bvp, self.h0, self.hN, Q_vis, T,
@@ -51,9 +50,8 @@ class RadiativeTransfer:
         )
         return phi_vis_new
 
-    def solve_thermal(self,phi_therm_prev, T, mu, F, Q_therm):
+    def solve_thermal(self,x,phi_therm_prev, T, mu, F, Q_therm):
         #Hapke thermal 2-stream RTE solver
-        x = self.grid.x_RTE
         if self.cfg.single_layer:
             # Use Dirichlet boundary condition for single-layer. Heat flux is balanced at bottom boundary. 
             D = self.cfg.sigma/np.pi * T[-1]**4
@@ -70,24 +68,26 @@ class RadiativeTransfer:
         )
         return phi_therm_new
 
-    def compute_source(self, T,phi_vis_prev,phi_therm_prev,mu, F, Q_therm=0.0, Q_vis=0.0):
+    def compute_source(self,T_layers,x_RTE,x,phi_vis_prev,phi_therm_prev,mu, F, Q_therm=0.0, Q_vis=0.0):
         # Using Hapke RTE model. 
         self.mu = mu
         self.F = F
+        #Interpolate temperature from layer centers to boundaries. 
+        T = np.interp(x,x_RTE,T_layers[1:self.grid.nlay_dust+1])
         if F > 0 or Q_vis > 1.0e-3:
-            phi_vis_new = self.solve_visible(phi_vis_prev,T, mu, F, Q_vis)
+            phi_vis_new = self.solve_visible(x,phi_vis_prev,T, mu, F, Q_vis)
             F2 = F*(mu>0.001)
             source_vis = self.cfg.eta * self.cfg.gamma_vis**2 * self.cfg.q * (
-                self.cfg.J * F2 * np.exp(-self.grid.x_RTE / mu) + 4*np.pi*phi_vis_new)
+                self.cfg.J * F2 * np.exp(-x / mu) + 4*np.pi*phi_vis_new)
         else:
-            source_vis = np.zeros(len(self.grid.x_RTE))
-            phi_vis_new = np.zeros(len(self.grid.x_RTE))
+            source_vis = np.zeros(len(x))
+            phi_vis_new = np.zeros(len(x))
             
-        phi_therm_new = self.solve_thermal(phi_therm_prev,T, mu, F, Q_therm)
+        phi_therm_new = self.solve_thermal(x,phi_therm_prev,T, mu, F, Q_therm)
         if self.cfg.single_layer:
-            d2 = self._therm_fun(self.grid.x_RTE, phi_therm_new, T[1:-1])
+            d2 = self._therm_fun(x, phi_therm_new, T)
         else:
-            d2 = self._therm_fun(self.grid.x_RTE, phi_therm_new, T[1:self.grid.nlay_dust+1])
+            d2 = self._therm_fun(x, phi_therm_new, T[:self.grid.nlay_dust+1])
         source_therm = np.pi * self.cfg.q * d2
 
         if not self.cfg.single_layer:
@@ -107,12 +107,14 @@ class RadiativeTransfer:
             if F > 0 or Q_vis > 1.0e-3:
                 boundary_flux += vis_down*np.pi
 
+        source_combined = source_vis + source_therm
+        source_centers = np.interp(x_RTE,x,source_combined)
         source = np.zeros(self.grid.x_num)
         if self.cfg.single_layer:
-            source[1:-1] = source_vis + source_therm
+            source[1:-1] = source_centers
             source *= self.grid.K
         else:
-            source[1:self.grid.nlay_dust+1] = source_vis + source_therm
+            source[1:self.grid.nlay_dust+1] = source_centers
             source *= self.grid.K
             source[self.grid.nlay_dust+1] = boundary_flux #store the boundary flux term here. 
         return source, phi_vis_new,phi_therm_new

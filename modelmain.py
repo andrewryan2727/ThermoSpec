@@ -82,8 +82,8 @@ class Simulator:
 		# Output arrays sized for interpolated output points
 		n_out = len(self.t_out)
 		self.T_out = np.zeros((self.grid.x_num, n_out))
-		self.phi_vis_out = np.zeros((self.grid.nlay_dust, n_out))
-		self.phi_therm_out = np.zeros((self.grid.nlay_dust, n_out))
+		self.phi_vis_out = np.zeros((self.grid.nlay_dust+1, n_out))
+		self.phi_therm_out = np.zeros((self.grid.nlay_dust+1, n_out))
 		self.T_surf_out = np.zeros(n_out)
 
 		# Arrays for storing integration step results for interpolation
@@ -94,8 +94,8 @@ class Simulator:
 		self.t_history = []
 
 		if self.cfg.use_RTE and self.cfg.RTE_solver=='hapke':
-			self.phi_therm_prev = np.zeros(self.grid.nlay_dust)
-			self.phi_vis_prev = np.zeros(self.grid.nlay_dust)
+			self.phi_therm_prev = np.zeros(self.grid.nlay_dust+1)
+			self.phi_vis_prev = np.zeros(self.grid.nlay_dust+1)
 
 		if self.cfg.crater:
 			n_facets = len(self.crater_mesh.normals)
@@ -128,8 +128,8 @@ class Simulator:
 					# Two-wave or non-RTE case: single radiance value per observer
 					self.observer_radiance_out = np.zeros((n_observers, n_out))
 			if(self.cfg.RTE_solver=='hapke'):
-				self.phi_therm_prev_crater = np.zeros((self.grid.nlay_dust,n_facets))
-				self.phi_vis_prev_crater = np.zeros((self.grid.nlay_dust,n_facets))
+				self.phi_therm_prev_crater = np.zeros((self.grid.nlay_dust+1,n_facets))
+				self.phi_vis_prev_crater = np.zeros((self.grid.nlay_dust+1,n_facets))
 
 	def _setup_thermal_evolution_solvers(self):
 		"""Initialize thermal evolution DISORT solvers based on thermal_evolution_mode."""
@@ -562,7 +562,7 @@ class Simulator:
 					
 			else:
 				reflected = self.phi_vis_prev[0] * 2.0 * np.pi  # Convert from radiance to flux
-				incident = self.F * self.cfg.J * self.mu
+				incident = self.F * self.cfg.J
 			absorbed_fraction = incident - reflected
 
 
@@ -595,7 +595,7 @@ class Simulator:
 					# For multi-wave, use the thermal flux sum directly
 					thermal_flux = np.sum(self.flux_up_therm[self.rte_disort.wavenumbers<3330.0])*np.pi*0.5
 			elif self.cfg.RTE_solver == 'hapke':
-				thermal_flux = self.phi_therm_prev[0]*2.0*np.pi  # Convert from radiance to flux
+				thermal_flux = self.phi_therm_prev[0]*np.pi**2.  # Convert from radiance to flux
 
 		# Energy emitted during this time step
 		emitted_energy = thermal_flux * dt
@@ -1016,7 +1016,7 @@ class Simulator:
 				# Compute radiative source term (if RTE enabled, otherwise remains zero)
 				if self.cfg.use_RTE:
 					if(self.cfg.RTE_solver == 'hapke'):
-						source_term,self.phi_vis_prev,self.phi_therm_prev = self.rte_hapke.compute_source(self.T,self.phi_vis_prev,self.phi_therm_prev, self.mu, self.F)
+						source_term,self.phi_vis_prev,self.phi_therm_prev = self.rte_hapke.compute_source(self.T,self.grid.x_RTE,self.grid.x_boundaries,self.phi_vis_prev,self.phi_therm_prev, self.mu, self.F)
 						source_term_vis = np.zeros_like(source_term) #Hapke model source term already includes vis. 
 					elif(self.cfg.RTE_solver == 'disort'):
 						source_term,self.flux_up_therm = self.rte_disort.disort_run(self.T,self.mu,self.F)
@@ -1143,7 +1143,7 @@ class Simulator:
 								if(self.cfg.RTE_solver == 'hapke'):
 									# Use proper solar incidence angle for this facet
 									source_term, self.phi_vis_prev_crater[:,i], self.phi_therm_prev_crater[:,i] = self.rte_hapke.compute_source(
-										self.T_crater[:,i], self.phi_vis_prev_crater[:,i], self.phi_therm_prev_crater[:,i],
+										self.T_crater[:,i], self.grid.x_RTE,self.grid.x_boundaries, self.phi_vis_prev_crater[:,i], self.phi_therm_prev_crater[:,i],
 										self.mu_solar_facets[i], self.illuminated[i], Q_therm=Q_selfheat[i], Q_vis=Q_scat[i])
 									#Calculate flux up from equation that phi = (up+down)/2, where down is the Q_therm from above. Multiply by pi as usual to convert from Hapke convention to flux in W/m2
 									self.flux_therm_crater[i] = (self.phi_therm_prev_crater[0,i]*2 - Q_selfheat[i])*np.pi
@@ -1264,7 +1264,7 @@ class Simulator:
 		"""
 		if self.cfg.RTE_solver == 'hapke':
 			# Hapke solver - always broadband
-			_,phi_vis_prev,phi_therm_prev = self.rte_hapke.compute_source(T_profile,self.phi_vis_prev,self.phi_therm_prev, 1.0, 1.0)
+			_,phi_vis_prev,phi_therm_prev = self.rte_hapke.compute_source(T_profile,self.grid.x_RTE,self.grid.x_boundaries,self.phi_vis_prev,self.phi_therm_prev, 1.0, 1.0)
 			vis_flux_up = phi_vis_prev[0]*2*np.pi
 			albedo = vis_flux_up/self.cfg.J
 			therm_flux_up = phi_therm_prev[0]*2*np.pi
@@ -2031,7 +2031,7 @@ if __name__ == "__main__":
 		plt.figure(figsize=(10, 6))
 		for frac in plot_fracs:
 			idx = np.argmin(np.abs(time_fracs - frac))
-			plt.semilogx(x_dust/Et, phi_therm[:,idx], 
+			plt.semilogx(sim.grid.x_boundaries/Et, phi_therm[:,idx], 
 						label=f't+{frac:.1f}P')
 			if not sim.cfg.diurnal: break
 		
@@ -2045,7 +2045,7 @@ if __name__ == "__main__":
 		plt.figure(figsize=(10, 6))
 		for frac in plot_fracs:
 			idx = np.argmin(np.abs(time_fracs - frac))
-			plt.semilogx(x_dust/Et, phi_vis[:,idx], 
+			plt.semilogx(sim.grid.x_boundaries/Et, phi_vis[:,idx], 
 						label=f't+{frac:.1f}P')
 			if not sim.cfg.diurnal: break
 		

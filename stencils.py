@@ -56,8 +56,8 @@ def build_bvp_stencil(x, nlay_dust):
     """
     h0 = x[1] - x[0] #first layer thickness
     hN = x[nlay_dust] - x[nlay_dust - 1] #last layer thickness
-    hx = x[1:nlay_dust+1] - x[:nlay_dust]
-    h = hx[1:] #thickness of all other layers
+    h = x[1:nlay_dust+1] - x[:nlay_dust]
+    #h = hx[1:] #thickness of all other layers
     h_im1 = h[:-1]
     h_ip1 = h[1:]
     A_im1 = 2.0 / (h_im1 * (h_im1 + h_ip1))
