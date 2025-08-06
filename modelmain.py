@@ -36,8 +36,8 @@ class Simulator:
 		if self.cfg.crater:
 			from crater import CraterMesh, SelfHeatingList, ShadowTester, CraterRadiativeTransfer
 			# File paths can be set in config or hardcoded for now
-			self.crater_mesh = CraterMesh('new_crater2.txt')
-			self.crater_selfheating = SelfHeatingList('new_crater2_selfheating_list.txt')
+			self.crater_mesh = CraterMesh('Roughness_files/new_crater2.txt')
+			self.crater_selfheating = SelfHeatingList('Roughness_files/new_crater2_selfheating_list.txt')
 			self.crater_shadowtester = ShadowTester(self.crater_mesh)
 			self.crater_radtrans = CraterRadiativeTransfer(
 				self.crater_mesh, self.crater_selfheating)
@@ -52,12 +52,18 @@ class Simulator:
 			self.rte_hapke  = RadiativeTransfer(self.cfg, self.grid)
 		if(self.cfg.use_RTE and self.cfg.RTE_solver == 'disort'):
 			self._setup_thermal_evolution_solvers()
-			self._setup_spectral_flux_solvers()
-			self._setup_output_radiance_solvers()
+			if self.cfg.compute_observer_radiance: 
+				self._setup_output_radiance_solvers()
 			if self.cfg.crater:
+				required_modes = set()
+				required_modes.add(self.cfg.thermal_evolution_mode)
+				required_modes.add(self.cfg.output_radiance_mode)
+				self._setup_spectral_flux_solvers(required_modes)
 				self._setup_crater_thermal_evolution_solvers() 
 		# Precompute time arrays and insolation flags
 		self._setup_time_arrays()
+		# Initialize diurnal convergence checking
+		self._setup_convergence_checker()
 		# Initialize state variables and output arrays
 		self._init_state()
 
@@ -196,7 +202,7 @@ class Simulator:
 	def _setup_output_radiance_solvers(self):
 		"""Initialize output radiance DISORT solvers based on output_radiance_mode."""
 		mode = self.cfg.output_radiance_mode
-		
+
 		if mode == 'two_wave':
 			# Standard two-wave setup: separate thermal and visible
 			self.rte_disort_out = DisortRTESolver(self.cfg, self.grid, 
@@ -226,6 +232,10 @@ class Simulator:
 													output_radiance=True, observer_mu=self.cfg.observer_mu)
 		else:
 			raise ValueError(f"Unknown output_radiance_mode: {mode}")
+		if hasattr(self.rte_disort_out,'wavenumbers') :
+			self.wavenumbers_out = self.rte_disort_out.wavenumbers
+		if hasattr(self.rte_disort_vis_out,'wavenumbers'):
+			self.wavenumbers_vis_out = self.rte_disort_vis_out.wavenumbers
 		
 		print(f"Output radiance mode: {mode}")
 	
@@ -268,14 +278,14 @@ class Simulator:
 		
 		print(f"Crater output radiance mode: {mode} (n_facets={self.n_facets})")
 	
-	def _setup_spectral_flux_solvers(self):
+	def _setup_spectral_flux_solvers(self, modes):
 		"""Set up dedicated DISORT solvers for spectral flux calculations (albedo/emissivity)."""
 		if not (self.cfg.use_RTE and self.cfg.RTE_solver == 'disort'):
 			return
 		
 		# Create flux-only solvers for both smooth and crater calculations
 		# These are lightweight solvers used only for computing spectral properties
-		for mode in ['two_wave', 'multi_wave', 'hybrid']:
+		for mode in modes:
 			# Smooth surface flux solvers (n_cols=1)
 			if mode == 'multi_wave':
 				setattr(self, f'rte_flux_{mode}', 
@@ -426,6 +436,31 @@ class Simulator:
 					self.sun_x_steady = 0.0
 					self.sun_y_steady = 0.0
 					self.sun_z_steady = -1.0
+	
+	def _setup_convergence_checker(self):
+		"""Initialize diurnal convergence checking if enabled."""
+		if self.cfg.diurnal and self.cfg.enable_diurnal_convergence:
+			from diurnal_convergence import create_convergence_checker
+			self.convergence_checker = create_convergence_checker(self.cfg)
+			
+			# Initialize cycle tracking variables
+			self.current_cycle_start_step = 0
+			self.previous_local_time = 0.0
+			self.cycle_surface_temps = []
+			self.cycle_times = []
+			self.cycle_local_times = []
+			self.cycle_energy_in = 0.0
+			self.cycle_energy_out = 0.0
+			self.cycle_step_count = 0
+			
+			# Convergence state tracking
+			self.verification_mode = False
+			
+			print(f"Diurnal convergence checking enabled using {self.cfg.diurnal_convergence_method} method")
+			print(f"Convergence tolerances: temp={self.cfg.diurnal_convergence_temp_tol}K, "
+			      f"energy={self.cfg.diurnal_convergence_energy_tol}")
+		else:
+			self.convergence_checker = None
 
 
 	def _bc(self, T, T_surf=0.0, Q = None):
@@ -499,10 +534,175 @@ class Simulator:
 		U_new = solve_banded((1, 1), self.grid.diag, b)
 		return U_new
 		# Apply boundary conditions
+	
+	def _calculate_absorbed_solar_energy(self, dt: float) -> float:
+		"""
+		Calculate absorbed solar energy for current time step.
+		
+		Args:
+			dt: Time step duration (seconds)
+			
+		Returns:
+			Absorbed solar energy (J/m²)
+		"""
+		if not self.F or not self.cfg.sun:
+			return 0.0
+			
+		# Solar flux incident on surface
+		if not self.cfg.use_RTE:
+			absorbed_fraction = self.F * self.cfg.J * self.mu * (1 - self.cfg.albedo)
+		else:
+			if self.cfg.RTE_solver == 'disort':
+				if self.cfg.thermal_evolution_mode in ['two_wave', 'hybrid']:
+					reflected = np.sum(self.flux_up_vis) if hasattr(self.flux_up_vis, '__len__') else self.flux_up_vis
+					incident = self.F * self.cfg.J
+				else:
+					reflected = np.sum(self.flux_up_therm[self.rte_disort.wavenumbers<3330.0])
+					incident = self.F * self.rte_disort.solar_sum
+					
+			else:
+				reflected = self.phi_vis_prev[0] * 2.0 * np.pi  # Convert from radiance to flux
+				incident = self.F * self.cfg.J * self.mu
+			absorbed_fraction = incident - reflected
 
 
-	def _make_outputs(self):
-		"""Interpolate integration results to desired output times, or just use final step for non-diurnal. Always compute DISORT radiance if needed. Also handles crater outputs."""
+			
+		# Energy absorbed during this time step
+		absorbed_energy = absorbed_fraction * dt
+		
+		return absorbed_energy
+	
+	def _calculate_emitted_thermal_energy(self, dt: float) -> float:
+		"""
+		Calculate emitted thermal energy for current time step.
+		
+		Args:
+			dt: Time step duration (seconds)
+			
+		Returns:
+			Emitted thermal energy (J/m²)
+		"""
+		if not self.cfg.use_RTE:
+			surface_temp = self.T_surf
+			emissivity = self.cfg.em
+			thermal_flux = emissivity * self.cfg.sigma * surface_temp**4  # W/m²
+		else:
+			if self.cfg.RTE_solver == 'disort':
+				if self.cfg.thermal_evolution_mode in ['two_wave', 'hybrid']:
+					# Sum thermal flux across all wavelengths to get total flux
+					thermal_flux = np.sum(self.flux_up_therm)*np.pi*0.5
+				else:
+					# For multi-wave, use the thermal flux sum directly
+					thermal_flux = np.sum(self.flux_up_therm[self.rte_disort.wavenumbers<3330.0])*np.pi*0.5
+			elif self.cfg.RTE_solver == 'hapke':
+				thermal_flux = self.phi_therm_prev[0]*2.0*np.pi  # Convert from radiance to flux
+
+		# Energy emitted during this time step
+		emitted_energy = thermal_flux * dt
+		
+		return emitted_energy
+	
+	def _check_diurnal_convergence(self, current_step: int) -> bool:
+		"""
+		Check diurnal convergence following Rozitis & Green 2011 methodology.
+		
+		Two-stage process:
+		1. Check for preliminary convergence at end of each cycle
+		2. If converged, run one more complete cycle and verify again
+		
+		Args:
+			current_step: Current simulation time step
+			
+		Returns:
+			True if final convergence is achieved and simulation should terminate
+		"""
+		if self.convergence_checker is None:
+			return False
+			
+		# Calculate local solar time for cycle detection
+		P = self.cfg.P
+		local_time = (self.current_time % P) / P * 24.0  # Hours
+		
+		# Detect cycle boundaries (when local solar time resets to small value)
+		cycle_boundary_detected = False
+		if current_step > 0:
+			time_step = P / self.t_num  # seconds per step
+			if local_time < 1.0 and self.previous_local_time > 23.0:  # Wrapped around
+				cycle_boundary_detected = True
+				
+		# Accumulate cycle data during the current cycle
+		if current_step > 0:  # Skip first step (initialization)
+			surface_temp = self.T[0] if self.cfg.use_RTE else self.T_surf
+			self.cycle_surface_temps.append(surface_temp)
+			self.cycle_times.append(self.current_time)
+			self.cycle_local_times.append(local_time)
+			
+			# Calculate energy for this time step
+			#dt = self.current_time - (self.cycle_times[-2] if len(self.cycle_times) > 1 else 0.0)
+			dt = self.grid.dt
+			if dt > 0:  # Avoid division by zero on first step
+				energy_in_step = self._calculate_absorbed_solar_energy(dt)
+				energy_out_step = self._calculate_emitted_thermal_energy(dt)
+				self.cycle_energy_in += energy_in_step
+				self.cycle_energy_out += energy_out_step
+			
+			self.cycle_step_count += 1
+		
+		# At cycle boundary, process completed cycle
+		if cycle_boundary_detected and self.cycle_step_count > 0:
+			from diurnal_convergence import CycleData
+			
+			# Create cycle data object
+			cycle_data = CycleData(
+				cycle_number=self.convergence_checker.current_cycle_number,
+				temperatures=np.array(self.cycle_surface_temps),
+				times=np.array(self.cycle_times),
+				energy_in=self.cycle_energy_in,
+				energy_out=self.cycle_energy_out,
+				local_solar_times=np.array(self.cycle_local_times)
+			)
+			
+			# Add to convergence checker
+			self.convergence_checker.add_cycle_data(cycle_data)
+			
+			# Simple convergence checking logic
+			print(f"Checking convergence at cycle {self.convergence_checker.current_cycle_number}...")
+			converged = self.convergence_checker.check_convergence()
+			
+			if converged:
+				if not hasattr(self, 'verification_mode') or not self.verification_mode:
+					# First time converged - enter verification mode
+					self.verification_mode = True
+					print(f"Convergence detected at cycle {self.convergence_checker.current_cycle_number}")
+					print("Running one additional cycle for verification...")
+				else:
+					# Second time converged - simulation complete
+					print(f"Convergence confirmed after verification cycle!")
+					return True  # Terminate simulation
+			else:
+				if hasattr(self, 'verification_mode') and self.verification_mode:
+					# Verification failed - reset to normal checking
+					print("Convergence lost during verification. Continuing simulation...")
+					self.verification_mode = False
+			
+			# Reset cycle tracking for next cycle
+			self.cycle_surface_temps = []
+			self.cycle_times = []
+			self.cycle_local_times = []
+			self.cycle_energy_in = 0.0
+			self.cycle_energy_out = 0.0
+			self.cycle_step_count = 0
+			self.current_cycle_start_step = current_step
+		
+		
+		# Update previous local time for next iteration
+		self.previous_local_time = local_time
+		
+		return False  # Continue simulation
+
+
+	def _make_thermal_outputs(self):
+		"""Interpolate thermal integration results to desired output times."""
 		from scipy.interpolate import interp1d
 		non_diurnal = not self.cfg.diurnal
 		if non_diurnal:
@@ -589,7 +789,10 @@ class Simulator:
 					self.T_crater_out = T_crater_hist[:, :, -len(self.t_out):]
 					self.T_surf_crater_out = T_surf_crater_hist[:, -len(self.t_out):]
 
-
+	def _make_radiance_outputs(self):
+		"""Calculate radiance outputs using interpolated thermal data."""
+		non_diurnal = not self.cfg.diurnal
+		
 		# CALCULATE RADIANCE OUTPUTS
 		if(self.cfg.use_RTE and self.cfg.RTE_solver=='disort'):
 			#Reinitialize disort to get observer radiance values at output times. 
@@ -602,15 +805,19 @@ class Simulator:
 			if self.cfg.output_radiance_mode == 'multi_wave':
 				nwave = len(self.rte_disort_out.wavenumbers)
 				self.radiance_out = np.zeros((nwave,self.T_out.shape[1]))
+				self.flux_out = np.zeros((nwave,self.T_out.shape[1]))
 			elif self.cfg.output_radiance_mode == 'hybrid':
 				# Hybrid mode: thermal wavelengths + broadband visible
 				nwave_thermal = len(self.rte_disort_out.wavenumbers)
 				self.radiance_out = np.zeros((nwave_thermal,self.T_out.shape[1]))  # Thermal spectral radiance
 				self.radiance_out_vis = np.zeros(self.T_out.shape[1])             # Visible broadband radiance
+				self.flux_out = np.zeros((nwave_thermal,self.T_out.shape[1]))  # Thermal spectral flux
+				self.flux_out_vis = np.zeros(self.T_out.shape[1])               # Visible
 			else:  # two_wave mode
 				self.radiance_out = np.zeros(self.T_out.shape[1])
 				self.radiance_out_therm = np.zeros(self.T_out.shape[1])
 				self.radiance_out_vis = np.zeros(self.T_out.shape[1])
+				self.flux_out = np.zeros(self.T_out.shape[1])
 			self.rad_T_out = np.zeros(self.T_out.shape[1])  #Temperature computed from radiance blackbody fit. 
 			wn_bounds = np.sort(np.loadtxt(self.cfg.wn_bounds_out))
 			print("Computing DISORT radiance spectra for output.")
@@ -625,32 +832,37 @@ class Simulator:
 				# Calculate output radiance based on output_radiance_mode
 				if self.cfg.output_radiance_mode == 'multi_wave':
 					# Multi-wave mode: single solver for all wavelengths
-					rad = self.rte_disort_out.disort_run(self.T_out[:,idx],self.mu_out[idx],F)
+					rad, fl_up = self.rte_disort_out.disort_run(self.T_out[:,idx],self.mu_out[idx],F)
 					self.radiance_out[:,idx] = rad.numpy()[:,0]
-					self.rad_T_out[idx], _, _, _ = fit_blackbody_wn_banded(self,wn_bounds, rad.numpy()[:,0],idx=idx)
-					
+					self.flux_out[:,idx] = fl_up[:,0].copy()
+					#self.rad_T_out[idx], _, _, _ = fit_blackbody_wn_banded(self,wn_bounds, rad.numpy()[:,0],idx=idx)
+					self.rad_T_out[idx], _, _, _ = max_btemp_blackbody(self, wn_bounds, self.radiance_out[:,idx], idx=idx)
 				elif self.cfg.output_radiance_mode == 'hybrid':
 					# Hybrid mode: multi-wave thermal only. 
-					rad_thermal = self.rte_disort_out.disort_run(self.T_out[:,idx],0.0,0.0) #thermal only, no vis. mu=0, F = 0. 
-					#rad_vis = self.rte_disort_vis_out.disort_run(self.T_out[:,idx],self.mu_out[idx],F)
+					rad_thermal, fl_up = self.rte_disort_out.disort_run(self.T_out[:,idx],0.0,0.0) #thermal only, no vis. mu=0, F = 0. 
+					#rad_vis, _ = self.rte_disort_vis_out.disort_run(self.T_out[:,idx],self.mu_out[idx],F)
 					self.radiance_out[:,idx] = rad_thermal[:,0,0,0].numpy()  # Store thermal spectral radiance
+					self.flux_out[:,idx] = fl_up[:,0].copy()  # Store thermal spectral flux
 					#self.radiance_out_vis[idx] = rad_vis.numpy()         # Store visible broadband radiance
-					self.rad_T_out[idx], _, _, _ = fit_blackbody_wn_banded(self,wn_bounds, self.radiance_out[:,idx],idx=idx)
-					
+					#self.rad_T_out[idx], _, _, _ = fit_blackbody_wn_banded(self,wn_bounds, self.radiance_out[:,idx],idx=idx)
+					#T_max, B_max, brightness_temps, wn_edges = max_btemp_blackbody(self, wn_bounds, self.radiance_out[:,idx], idx=idx)
+					self.rad_T_out[idx], _, _, _ = max_btemp_blackbody(self, wn_bounds, self.radiance_out[:,idx], idx=idx)
 				else:  # two_wave mode
 					# Two-wave mode: separate thermal and visible solvers
-					rad_thermal = self.rte_disort_out.disort_run(self.T_out[:,idx],self.mu_out[idx],F)
-					rad_vis = self.rte_disort_vis_out.disort_run(self.T_out[:,idx],self.mu_out[idx],F)
+					rad_thermal, fl_up = self.rte_disort_out.disort_run(self.T_out[:,idx],self.mu_out[idx],F)
+					rad_vis, fl_up_vis = self.rte_disort_vis_out.disort_run(self.T_out[:,idx],self.mu_out[idx],F)
 					self.radiance_out[idx] = (rad_thermal+rad_vis).numpy()
 					self.radiance_out_therm[idx] = rad_thermal.numpy()
 					self.radiance_out_vis[idx] = rad_vis.numpy()
+					self.flux_out[idx] = fl_up.copy()
+					self.flux_out_vis[idx] = fl_up_vis.copy()
 					self.rad_T_out[idx] = (rad_thermal.numpy()*np.pi/self.cfg.sigma)**0.25
-			# if self.cfg.multi_wave:
-			# 	#Run disort again with spectral features removed to produce a smooth radiance spectrum for emissivity division. 
-			# 	self.disort_emissivity()
+			if self.cfg.output_radiance_mode in ['multi_wave', 'hybrid']:
+				#Run disort again with spectral features removed to produce a smooth radiance spectrum for emissivity division. 
+				self.disort_emissivity()
 		
 		# CRATER RADIANCE CALCULATION
-		if (self.cfg.crater and self.cfg.compute_observer_radiance and 
+		if (self.cfg.use_RTE and self.cfg.crater and self.cfg.compute_crater_radiance and 
 			hasattr(self, 'observer_radiance_calc')):
 			print("Computing crater observer radiance.")
 			
@@ -747,17 +959,23 @@ class Simulator:
 				else:
 					# observer_radiances shape: [n_observers, n_times]  
 					self.observer_radiance_out[:, idx] = observer_radiances
+		
+		print("Radiance calculation completed.")
 
 
-	def run(self):
-		"""Execute the full time-stepping simulation."""
+	def run(self, calculate_radiance=True):
+		"""Execute the full time-stepping simulation.
+		
+		Args:
+			calculate_radiance: Whether to calculate radiance outputs (default True for backwards compatibility)
+		"""
 		start_time = time.time()
 		
 		# Steady-state convergence settings
 		check_convergence = not self.cfg.diurnal
 		n_check = getattr(self.cfg, 'steady_n_check', 200)  # How often to check
 		window = getattr(self.cfg, 'steady_window', 100)     # How far back to look for temperature history polynomial fit. 
-		tol = getattr(self.cfg, 'steady_tol', 2.0)         # Convergence threshold (K to extremum)
+		tol = getattr(self.cfg, 'steady_tol', 0.1)         # Convergence threshold (K to extremum)
 		converged = False
 
 		source_term = np.zeros(self.grid.x_num)
@@ -768,7 +986,7 @@ class Simulator:
 			# Non-diurnal: extend time arrays as needed for steady-state convergence
 			j = 0
 			dt = self.t[1] - self.t[0]  # Get dt from setup
-			max_steps = 100000  # Safety limit for non-diurnal
+			max_steps = 200000  # Safety limit for non-diurnal
 		else:
 			max_steps = self.t_num
 			
@@ -801,15 +1019,14 @@ class Simulator:
 						source_term,self.phi_vis_prev,self.phi_therm_prev = self.rte_hapke.compute_source(self.T,self.phi_vis_prev,self.phi_therm_prev, self.mu, self.F)
 						source_term_vis = np.zeros_like(source_term) #Hapke model source term already includes vis. 
 					elif(self.cfg.RTE_solver == 'disort'):
-						source_term,_ = self.rte_disort.disort_run(self.T,self.mu,self.F)
-						if self.cfg.thermal_evolution_mode in ['two_wave', 'hybrid']:
+						source_term,self.flux_up_therm = self.rte_disort.disort_run(self.T,self.mu,self.F)
+						if self.cfg.thermal_evolution_mode in ['two_wave', 'hybrid'] and self.F > 0.001:
 							# Two-wave and hybrid modes: run separate visible solver
-							source_term_vis,_ = self.rte_disort_vis.disort_run(self.T,self.mu,self.F)
-						elif self.cfg.thermal_evolution_mode == 'multi_wave':
-							# Multi-wave mode: all wavelengths handled by single solver
-							source_term_vis = np.zeros_like(source_term)
+							source_term_vis,self.flux_up_vis = self.rte_disort_vis.disort_run(self.T,self.mu,self.F)
 						else:
-							raise ValueError(f"Unknown thermal_evolution_mode: {self.cfg.thermal_evolution_mode}")
+							# Multi-wave mode, or the sun is not up: all wavelengths handled by single solver
+							source_term_vis = np.zeros_like(source_term)
+							self.flux_up_vis = np.zeros_like(self.flux_up_therm)
 					else:
 						print("Error: Invalid RTE solver choice! Options are hapke or disort, or set use_RTE to False")
 						return self.T_out, self.phi_vis_out, self.phi_therm_out, self.T_surf_out, self.t_out
@@ -986,6 +1203,13 @@ class Simulator:
 					converged = True
 					break
 
+			# Diurnal convergence checking
+			if self.cfg.diurnal and self.convergence_checker is not None:
+				converged = self._check_diurnal_convergence(j)
+				if converged:
+					print(f"Diurnal convergence achieved! {self.convergence_checker.convergence_message}")
+					break
+			
 			# Optional progress updates
 			if self.cfg.diurnal and j % max(100, self.t_num//20) == 0:
 				print(f"Time step {j}/{self.t_num}")
@@ -999,11 +1223,25 @@ class Simulator:
 			if self.cfg.diurnal and j >= self.t_num:
 				break
 
-		# Interpolate results to desired output times
-		self._make_outputs()
+		# Always interpolate thermal results to desired output times
+		self._make_thermal_outputs()
+		
+		# Optionally calculate radiance outputs
+		if calculate_radiance:
+			self._make_radiance_outputs()
 
 		elapsed = time.time() - start_time
 		print(f"Simulation completed in {elapsed:.2f} s")
+		
+		# Print convergence diagnostics if available
+		if self.cfg.diurnal and self.convergence_checker is not None:
+			diagnostics = self.convergence_checker.get_convergence_diagnostics()
+			print(f"Convergence diagnostics:")
+			print(f"  - Method: {diagnostics['method']}")
+			print(f"  - Cycles completed: {diagnostics['cycles_completed']}")
+			print(f"  - Converged: {diagnostics['converged']}")
+			if diagnostics['converged']:
+				print(f"  - Final message: {diagnostics['convergence_message']}")
 
 		return self.T_out, self.phi_vis_out, self.phi_therm_out, self.T_surf_out, self.t_out
 	
@@ -1202,9 +1440,9 @@ class Simulator:
 				t = self.t_out[idx]
 				F_idx = np.argmin(np.abs(t_hist - t))
 				F = self.F_array[F_idx] #get nearest value for F. Don't want to interpolate and get a value that isn't 0 or 1. 
-			rad = rte_disort.disort_run(self.T_out[:,idx],self.mu_out[idx],F)
+			rad, _ = rte_disort.disort_run(self.T_out[:,idx],self.mu_out[idx],F)
 			if self.cfg.output_radiance_mode in ['multi_wave', 'hybrid']:
-				self.radiance_out_uniform[:,idx] = rad[:,0]
+				self.radiance_out_uniform[:,idx] = rad[:,0,0,0]
 			else:
 				self.radiance_out_uniform[idx] = rad
 
@@ -1223,6 +1461,7 @@ def planck_wn_integrated(wn_edges, T):
 	Integrate the Planck function over each wavenumber bin (edges in cm^-1).
 	Returns band-integrated radiance (W/m^2/sr per band).
 	"""
+	import scipy.integrate
 	h = 6.62607015e-34  # Planck constant (J s)
 	c = 2.99792458e8    # Speed of light (m/s)
 	k = 1.380649e-23    # Boltzmann constant (J/K)
@@ -1233,10 +1472,10 @@ def planck_wn_integrated(wn_edges, T):
 	for i in range(len(B_bands)):
 		# Integrate over each bin
 		B_bands[i], _ = scipy.integrate.quad(planck_wn, wn_edges[i], wn_edges[i+1], args=(T,), limit=100)
-	# Removed division by bin width to match DISORT's band-integrated output
 	return B_bands*100
 
-def fit_blackbody_wn_banded(sim,wn_edges, radiance,idx=-1):
+
+def fit_blackbody_wn_banded(sim,wn_edges_input, radiance_input,idx=-1):
 	"""
 	Fit a blackbody spectrum (integrated over each wavenumber band) to the given radiance spectrum.
 	wn_edges: array of bin edges (cm^-1)
@@ -1244,9 +1483,9 @@ def fit_blackbody_wn_banded(sim,wn_edges, radiance,idx=-1):
 	Returns best-fit temperature and the fitted blackbody band-integrated spectrum.
 	"""
 	wn_cutoff = 1500  # cm^-1, cutoff for fitting
-	indx = np.argmin(np.abs(wn_edges - wn_cutoff))
-	wn_edges = wn_edges[:indx]  # Use only up to the cutoff wavenumber
-	radiance = radiance[:indx-1]  # Corresponding radiance values
+	indx = np.argmin(np.abs(wn_edges_input - wn_cutoff))
+	wn_edges = wn_edges_input[:indx]  # Use only up to the cutoff wavenumber
+	radiance = radiance_input[:indx-1]  # Corresponding radiance values
 	def loss(T):
 		B = planck_wn_integrated(wn_edges, T[0])
 		mask = (radiance > 0) & (B > 0)
@@ -1265,8 +1504,87 @@ def fit_blackbody_wn_banded(sim,wn_edges, radiance,idx=-1):
 		maxbound = sim.T_out[:,idx].max()+5
 	res = scipy.optimize.minimize(loss, [T0], bounds=[(minbound, maxbound)],)
 	T_fit = res.x[0]
-	B_fit = planck_wn_integrated(wn_edges, T_fit)
-	return T_fit, B_fit, radiance/B_fit, wn_edges
+	B_fit = planck_wn_integrated(wn_edges_input, T_fit)
+	return T_fit, B_fit, radiance_input/B_fit, wn_edges
+
+
+def max_btemp_blackbody(sim, wn_edges_input, radiance_input, idx=-1):
+	"""
+	Calculate brightness temperature for each wavenumber band, find the maximum,
+	and generate a Planck blackbody spectrum using that maximum temperature.
+	
+	Args:
+		sim: Simulator object (for temperature bounds)
+		wn_edges: array of bin edges (cm^-1)
+		radiance: array of band-integrated radiances (same length as len(wn_edges)-1)
+		idx: time index for setting temperature bounds (default -1)
+		
+	Returns:
+		T_max: maximum brightness temperature across all bands
+		B_max: Planck blackbody spectrum at T_max for all bands
+		brightness_temps: array of brightness temperatures for each band
+		wn_edges: wavenumber edges used
+	"""
+	#Min and max wavenumbers to look for the Christiansen Feature brightness temperature peak. 
+	wn_min = 900  # cm^-1, cutoff for fitting (same as original function)
+	wn_max = 1700
+	indx1 = np.argmin(np.abs(wn_edges_input - wn_min))
+	indx2 = np.argmin(np.abs(wn_edges_input - wn_max))
+	wn_edges = wn_edges_input[indx1:indx2]  # Use only up to the cutoff wavenumber
+	radiance = radiance_input[indx1:indx2-1]  # Corresponding radiance values
+	
+	# Physical constants for Planck function inversion
+	h = 6.62607015e-34  # Planck constant (J s)
+	c = 2.99792458e8    # Speed of light (m/s)
+	k = 1.380649e-23    # Boltzmann constant (J/K)
+	
+	def radiance_to_brightness_temp(wn_low, wn_high, radiance_band):
+		"""
+		Convert band-integrated radiance to brightness temperature by solving 
+		the inverse Planck function numerically.
+		"""
+		if radiance_band <= 0:
+			return 0.0
+			
+		def planck_diff(T):
+			# Calculate Planck function integrated over the band
+			B_calc = planck_wn_integrated([wn_low, wn_high], T[0])
+			return 1e4*(B_calc[0] - radiance_band)**2
+		
+		# Set reasonable temperature bounds
+		if hasattr(sim, 'T_crater_out'):
+			if np.ndim(sim.T_crater_out) == 2:
+				minbound = max(10, sim.T_crater_out.min() - 20)
+				maxbound = sim.T_crater_out.max() + 20
+			else:
+				minbound = max(10, sim.T_crater_out[:,:,idx].min() - 20)
+				maxbound = sim.T_crater_out[:,:,idx].max() + 20
+		else:
+			minbound = max(1, sim.T_out[:,idx].min() - 20)
+			maxbound = sim.T_out[:,idx].max() + 20
+			
+		# Initial guess
+		T0 = sim.T_out[1,idx] if hasattr(sim, 'T_out') else 300.0
+		
+		try:
+			res = scipy.optimize.minimize(planck_diff, [T0], bounds=[(minbound, maxbound)])
+			return res.x[0]
+		except:
+			# Fallback to simple estimation if optimization fails
+			return T0
+	
+	# Calculate brightness temperature for each band
+	brightness_temps = np.zeros(len(radiance))
+	for i in range(len(radiance)):
+		brightness_temps[i] = radiance_to_brightness_temp(wn_edges[i], wn_edges[i+1], radiance[i])
+	
+	# Find maximum brightness temperature
+	T_max = np.max(brightness_temps[brightness_temps > 0])
+	
+	# Generate Planck blackbody spectrum at maximum temperature
+	B_max = planck_wn_integrated(wn_edges_input, T_max)
+	
+	return T_max, B_max, brightness_temps, wn_edges
 
 
 def calculate_interface_T(T,i,alpha,beta):
@@ -1575,7 +1893,7 @@ def plot_observer_emissivity_spectra_interactive(observer_radiance_out, observer
 			wn_bounds = np.sort(np.loadtxt(sim.cfg.wn_bounds_out))
 			T_fit, B_fit, emiss_spec, wn_BB = fit_blackbody_wn_banded(sim,wn_bounds, observer_radiance_out[obs_idx, :, t_idx],idx=t_idx)
 			idx1 = np.argmin(np.abs(wavenumbers - 900))
-			idx2 = np.argmin(np.abs(wavenumbers - 1200))
+			idx2 = np.argmin(np.abs(wavenumbers - 1700))
 			cf_emis = emiss_spec[idx1:idx2].max()
 			emissivity_data[obs_idx, :indx, t_idx] = emiss_spec + 1 - cf_emis
 	
@@ -1628,7 +1946,7 @@ def plot_observer_emissivity_spectra_interactive(observer_radiance_out, observer
 
 if __name__ == "__main__":
 	sim = Simulator()
-	T_out, phi_vis, phi_therm, T_surf_out, t_out = sim.run()
+	T_out, phi_vis, phi_therm, T_surf_out, t_out = sim.run(calculate_radiance=sim.cfg.compute_observer_radiance)
 	import matplotlib.pyplot as plt
 
 	# Plot temperature at the surface (first grid point) over time
@@ -1644,11 +1962,11 @@ if __name__ == "__main__":
 				if not sim.cfg.single_layer:
 					T_interface = calculate_interface_T(T_out[:,j], sim.grid.nlay_dust, sim.grid.alpha, sim.grid.beta)
 				emissT[j] = emissionT(T_out[1:sim.grid.nlay_dust+1,j],sim.grid.x_boundaries[:sim.grid.nlay_dust+1],T_interface,1.0)
-			plt.plot(sim.t_out / 3600, emissT, label='Emission Temperature')
-			if(sim.cfg.RTE_solver == 'disort'):
-				plt.plot(sim.t_out / 3600, sim.rad_T_out, label='Radiance Fit Temperature')
+			plt.plot(sim.t_out / 3600, emissT, label='Emission Temperature, 0° emission angle')
+			if(sim.cfg.RTE_solver == 'disort' and sim.cfg.compute_observer_radiance):
+				plt.plot(sim.t_out / 3600, sim.rad_T_out, label='Disort radiance Fit Temperature')
 			if(sim.cfg.RTE_solver== 'hapke'):
-				plt.plot(sim.t_out / 3600, (sim.phi_therm_out[0,:]*2*np.pi/sim.cfg.sigma)**0.25,label="phi therm temperature")
+				plt.plot(sim.t_out / 3600, (sim.phi_therm_out[0,:]*2*np.pi/sim.cfg.sigma)**0.25,label="phi therm temperature (integrated radiance)")
 		else:
 			plt.plot(sim.t_out / 3600, T_surf_out, label='Surface Temperature (no RTE)')
 		if sim.cfg.crater and hasattr(sim, 'T_surf_crater_out'):
@@ -1684,7 +2002,7 @@ if __name__ == "__main__":
 	for frac in plot_fracs:
 		# Find nearest output time to desired fraction
 		idx = np.argmin(np.abs(time_fracs - frac))
-		plt.semilogx(x[1:]/Et, T_out[1:,idx], 
+		plt.plot(x[1:]/Et, T_out[1:,idx], 
 					 label=f't+{frac:.1f}P')
 		if not sim.cfg.diurnal: break
 	
@@ -1739,23 +2057,25 @@ if __name__ == "__main__":
 
 	# Plot final emissivity spectrum for non-diurnal, DISORT case
 	if (not sim.cfg.diurnal) and sim.cfg.use_RTE and sim.cfg.RTE_solver == 'disort' and sim.cfg.output_radiance_mode in ['multi_wave', 'hybrid']:
-		wn = sim.rte_disort_out.wavenumbers  # [cm^-1], band centers
+		wn = sim.wavenumbers_out  # [cm^-1], band centers
 		final_rad = sim.radiance_out[:, -1]  # Final time step
 		ir_cutoff = np.argmin(np.abs(wn - 1500))  # cm^-1, cutoff for IR bands
 		# Read bin edges from config
 		wn_bounds = np.sort(np.loadtxt(sim.cfg.wn_bounds_out))
-		T_fit, B_fit, emiss_spec, wn_BB = fit_blackbody_wn_banded(sim,wn_bounds, final_rad)
+		#T_fit, B_fit, emiss_spec, wn_BB = fit_blackbody_wn_banded(sim,wn_bounds, final_rad)
+		T_fit, B_fit, btemps, wn_BB = max_btemp_blackbody(sim,wn_bounds, final_rad)
+		emiss_spec = final_rad/B_fit
 		substrate = np.loadtxt(sim.cfg.substrate_spectrum_out)
 		#otesT1 = np.loadtxt(sim.cfg.otesT1_out)
 		#otesT2 = np.loadtxt(sim.cfg.otesT2_out)
 		idx1 = np.argmin(np.abs(wn - 900))
-		idx2 = np.argmin(np.abs(wn - 1200))
+		idx2 = np.argmin(np.abs(wn - 1700))
 		#otes_cf_emis = otesT1[idx1:idx2,1].max()
 		#bbfit_cf_emis = emiss_spec[idx1:idx2].max()
 		#ds_cf_emis = (final_rad/sim.radiance_out_uniform[:, -1])[idx1:idx2].max()
 		ds_cf_emis = emiss_spec[idx1:idx2+1].max()  # Max emissivity in this range
 		#samp_cf_emis = otes_samp[idx1:idx2,1].max()
-		idx1 = np.argmin(np.abs(substrate[:,0] - 1200))
+		idx1 = np.argmin(np.abs(substrate[:,0] - 1700))
 		idx2 = np.argmin(np.abs(substrate[:,0] - 900))
 		substrate_cf = substrate[idx1:idx2,1].max()
 		plt.figure()
@@ -1763,16 +2083,18 @@ if __name__ == "__main__":
 		#plt.plot(multi_wn_BB, multi_emiss_spec, label=f'Mixture Emissivity (T_fit={multi_T_fit})')
 		plt.plot(wn[:ir_cutoff], emiss_spec[:ir_cutoff]+1-ds_cf_emis, label=f'Emissivity (T_fit={T_fit:.1f} K)',linewidth=2)
 		#plt.plot(wn[:ir_cutoff], (final_rad/sim.radiance_out_uniform[:, -1])[:ir_cutoff]+1-ds_cf_emis, label='DISORT emissivity',linewidth=2)
-		plt.plot(substrate[:,0], substrate[:,1]+1-substrate_cf, label='Sabel Enstatite',linewidth=1)
+		#plt.plot(substrate[:,0], substrate[:,1]+1-substrate_cf, label='Sabel Enstatite',linewidth=1)
 		if(sim.cfg.crater):
 			for i in np.arange(sim.observer_radiance_out.shape[0]):
 				final_rad_crater = sim.observer_radiance_out[i,:,0] #[observation_angle, wavelengths, time]
-				T_fit, B_fit, emiss_spec, wn_BB = fit_blackbody_wn_banded(sim,wn_bounds, final_rad_crater,idx=0)
+				#T_fit, B_fit, emiss_spec, wn_BB = fit_blackbody_wn_banded(sim,wn_bounds, final_rad_crater,idx=0)
+				T_fit, B_fit, btemps, wn_BB = max_btemp_blackbody(sim,wn_bounds, final_rad_crater)
+				emiss_spec = final_rad_crater/B_fit
 				print(T_fit)
-				idx1 = np.argmin(np.abs(wn_BB - 900))
-				idx2 = np.argmin(np.abs(wn_BB - 1200))
-				ds_cf_emis = emiss_spec[idx1:idx2+1].max()
-				plt.plot(wn_BB[:-1], emiss_spec+1-ds_cf_emis, label='DISORT crater emissivity',linewidth=2)
+				idx1 = np.argmin(np.abs(wn - 900))
+				idx2 = np.argmin(np.abs(wn - 1700))
+				ds_cf_emis = emiss_spec[idx1:idx2].max()
+				plt.plot(wn[:ir_cutoff], emiss_spec[:ir_cutoff]+1-ds_cf_emis, label='DISORT crater emissivity',linewidth=2)
 		#plt.plot(wn[:ir_cutoff], otesT1[:ir_cutoff,1], label='OTES T1 (fewer fines)')
 		#plt.plot(wn[:ir_cutoff], otesT2[:ir_cutoff,1], label='OTES T2 (more fines)')
 		plt.xlabel('Wavenumber [cm$^{-1}$]')

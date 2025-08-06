@@ -228,9 +228,9 @@ class ObserverRadianceCalculator:
                     
                     if self.cfg.output_radiance_mode == 'multi_wave':
                         Q_total_batch = Q_therm_batch + Q_vis_batch
-                        radiances_batch = disort_batch.disort_run(T_visible, mu_sun, F_sun, Q=Q_total_batch)
+                        radiances_batch, _ = disort_batch.disort_run(T_visible, mu_sun, F_sun, Q=Q_total_batch)
                     else:  # hybrid
-                        radiances_batch = disort_batch.disort_run(T_visible, 0.0, 0.0, Q=Q_therm_batch)
+                        radiances_batch, _ = disort_batch.disort_run(T_visible, 0.0, 0.0, Q=Q_therm_batch)
                     
                     # Extract radiance for each facet at its corresponding observer angle
                     # radiances_batch shape: [n_waves, n_facets, n_depth, n_mu, n_phi]
@@ -260,7 +260,7 @@ class ObserverRadianceCalculator:
                                                          observer_phi=np.array(visible_phi),spectral_component='thermal_only')
                     
                     Q_therm_batch = np.array([Q_selfheat_facets[i, 0] for i in visible_facets])
-                    radiances_thermal = disort_thermal_batch.disort_run(T_visible, mu_sun, F_sun, Q=Q_therm_batch)
+                    radiances_thermal, _ = disort_thermal_batch.disort_run(T_visible, mu_sun, F_sun, Q=Q_therm_batch)
                     
                     # Extract radiance for each facet
                     for idx, facet_i in enumerate(visible_facets):
@@ -307,10 +307,10 @@ class ObserverRadianceCalculator:
                     if self.cfg.output_radiance_mode in ['multi_wave', 'hybrid']:
                         # Multi-wave or hybrid case: return spectral radiance
                         if self.cfg.output_radiance_mode == 'multi_wave':
-                            radiance = disort_thermal.disort_run(T_facet, mu_sun, F_sun, Q=Q_total)
+                            radiance, _ = disort_thermal.disort_run(T_facet, mu_sun, F_sun, Q=Q_total)
                         else:
                             # Hybrid mode: thermal wavelengths only, no sun. 
-                            radiance = disort_thermal.disort_run(T_facet, 0.0, 0.0, Q=Q_therm)
+                            radiance, _ = disort_thermal.disort_run(T_facet, 0.0, 0.0, Q=Q_therm)
                         if hasattr(radiance, 'numpy'):
                             radiance = radiance.numpy()
                         # radiance should be shape [n_waves] or [n_waves, 1]
@@ -320,7 +320,7 @@ class ObserverRadianceCalculator:
                             facet_radiance = radiance
                     else:
                         # Two-wave case: thermal + visible, return single value
-                        rad_thermal = disort_thermal.disort_run(T_facet, mu_sun, F_sun, Q=Q_therm)
+                        rad_thermal, _ = disort_thermal.disort_run(T_facet, mu_sun, F_sun, Q=Q_therm)
                         #rad_vis = disort_vis.disort_run(T_facet, mu_sun, F_sun, Q=Q_vis)
                         
                         if hasattr(rad_thermal, 'numpy'):

@@ -240,6 +240,7 @@ class CraterRadiativeTransfer:
         for i in range(n_facets):
             idxs = self.selfheating.indices[i]
             if(therm_flux.ndim == 1):
+                #Should be of size [ncols, nwave] or [ncols, 1]
                 vfs = self.selfheating.view_factors[i]
             else:
                 vfs = self.selfheating.view_factors[i][:,None]

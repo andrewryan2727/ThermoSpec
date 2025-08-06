@@ -53,7 +53,17 @@ class DisortRTESolver:
         self.fisot = torch.zeros((nwave,n_cols))
         self.temis = torch.ones((nwave,n_cols)) #Top emissivity (space). Stays at 1. 
         self.btemp = torch.zeros(n_cols)
-        self.ttemp  = torch.zeros(n_cols) #Space temperature. Stays at 0. 
+        self.ttemp  = torch.full((n_cols,), self.cfg.disort_space_temp) #Space temperature. Stays unchanged, usually set to 0 for space.  
+        self.bc = {
+            "umu0": self.umu0, #Cosine of solar incidence angle
+            "phi0": self.phi0, #Azimuth angle of solar incidence. 
+            "albedo": self.albedo, #Albedo of bottom boundary
+            "btemp": self.btemp, #Brightness temperature of bottom boundary. 
+            "ttemp": self.ttemp, #Top boundary temperature (space)
+            "temis": self.temis, #Emissivity of top boundary (space)
+            "fisot": self.fisot, #Intensity of top-boundary isotropic illumination (W/m^2)
+            "fbeam": self.fbeam #Intensity of incidence parallel beam Solar flux (W/m^2)
+        }
 
     def _determine_effective_mode(self):
         """Determine the effective operating mode for this DISORT instance."""
@@ -82,14 +92,15 @@ class DisortRTESolver:
                 raise ValueError(f"Unknown solver_mode: {self.solver_mode}")
         else:
             # Legacy mode: determine from existing logic
-            if self.cfg.multi_wave:
-                self.effective_mode = 'multi_wave'
-                self.is_multi_wave = True
-                self.should_load_solar_spectrum = True  # Legacy multi-wave needs solar spectrum
-            else:
-                self.effective_mode = 'two_wave'
-                self.is_multi_wave = False
-                self.should_load_solar_spectrum = False  # Legacy two-wave uses cfg.J
+            raise ValueError(f"Solver mode must be specified!")
+            # if self.cfg.multi_wave:
+            #     self.effective_mode = 'multi_wave'
+            #     self.is_multi_wave = True
+            #     self.should_load_solar_spectrum = True  # Legacy multi-wave needs solar spectrum
+            # else:
+            #     self.effective_mode = 'two_wave'
+            #     self.is_multi_wave = False
+            #     self.should_load_solar_spectrum = False  # Legacy two-wave uses cfg.J
     
     def _filter_thermal_wavelengths(self):
         """Filter loaded constants to thermal wavelengths only (for hybrid_thermal mode)."""
@@ -146,6 +157,7 @@ class DisortRTESolver:
             if(len(solar_array[:,0]) != len(self.wavenumbers) or np.max(solar_array[:,0]-self.wavenumbers)>0.1):
                 print("Warning: Solar spectrum file wavenumbers do not match scattering files!")
             self.solar = solar_array[:,1]/self.cfg.R**2.
+            self.solar_sum = np.sum(self.solar)
         if(self.cfg.use_spec):
             #Load emissivity spectrum for substrate. 
             emiss_spec = np.loadtxt(emissivity_file)
@@ -235,25 +247,25 @@ class DisortRTESolver:
                     Et = n_p * self.Cext_array[i_wave]*1e-12 #extinction coefficient at this wavelength, converting Cext from µm^2 to m^2 in the process. 
                     if(self.uniform_props):
                         Et = n_p * np.mean(self.Cext_array[self.wn_min:self.wn_max])*1e-12
-                    #Et = Et*0.0 + 220.0 #manual override to fixed value for testing 
+                    #Et = Et*10.0 + 0.0 #manual override to fixed value for testing 
                     tau_boundaries = Et*self.grid.x_boundaries/self.cfg.Et #tau at boundaries of each layer, convert from global Et to wavelength-specific Et.  
                     dtau = tau_boundaries[1:] - tau_boundaries[:-1] #tau thickness of each layer
                     tau_layer = torch.tensor(dtau,dtype=torch.float64)
                     ssalb_val = self.ssalb_array[i_wave].copy()
                     if(self.cfg.force_vis_disort and self.wavenumbers[i_wave] >3330.0):
                         #Force all visible wavelengths to use the DISORT default value for visible scattering albedo
-                        ssalb_val = self.cfg.disort_ssalb_vis
+                        ssalb_val = self.cfg.ssalb_vis
                     if(self.uniform_props):
                         ssalb_val = np.mean(self.ssalb_array[self.wn_min:self.wn_max])
                     # if self.wavenumbers[i_wave] >3330.0: 
                     #     ssalb_val = ssalb_val*0.0 + 0.5 #manual override to fixed value for testing VISIBLE. 
                     # else:
-                    #     ssalb_val = ssalb_val*0.0 + 0.1 #manual override for fixed value testing THERMAL
+                    #     ssalb_val = ssalb_val*0.0 + 0.8 #manual override for fixed value testing THERMAL
                     ssa_layer = torch.full([n_layers], ssalb_val,dtype=torch.float64)
                     g_val = self.g_array[i_wave]
                     if(self.cfg.force_vis_disort and self.wavenumbers[i_wave] >3330.0):
                         #Force all visible wavelengths to use the DISORT default value for visible scattering asymmetry factor
-                        g_val = self.cfg.disort_g_vis
+                        g_val = self.cfg.g_vis
                     #g_val = g_val*0.0 #manual override to fixed value for testing. 
                     if(self.uniform_props):
                         g_val = np.mean(self.g_array[self.wn_min:self.wn_max])
@@ -337,6 +349,7 @@ class DisortRTESolver:
         upper_bounds = wn_bounds[1:].tolist()   # upper edge for each bin
         return lower_bounds, upper_bounds
     
+
 
 
     def disort_run(self, T, mu, F, Q=None, phi=None):
@@ -452,16 +465,16 @@ class DisortRTESolver:
             else:
                 self.phi0.fill_(0.0)  # Default to 0 if not provided
 
-        bc = {
-            "umu0": self.umu0, #Cosine of solar incidence angle
-            "phi0": self.phi0, #Azimuth angle of solar incidence. 
-            "albedo": self.albedo, #Albedo of bottom boundary
-            "btemp": self.btemp, #Brightness temperature of bottom boundary. 
-            "ttemp": self.ttemp, #Top boundary temperature (space)
-            "temis": self.temis, #Emissivity of top boundary (space)
-            "fisot": self.fisot, #Intensity of top-boundary isotropic illumination (W/m^2)
-            "fbeam": self.fbeam #Intensity of incidence parallel beam Solar flux (W/m^2)
-        }
+        # self.bc = {
+        #     "umu0": self.umu0, #Cosine of solar incidence angle
+        #     "phi0": self.phi0, #Azimuth angle of solar incidence. 
+        #     "albedo": self.albedo, #Albedo of bottom boundary
+        #     "btemp": self.btemp, #Brightness temperature of bottom boundary. 
+        #     "ttemp": self.ttemp, #Top boundary temperature (space)
+        #     "temis": self.temis, #Emissivity of top boundary (space)
+        #     "fisot": self.fisot, #Intensity of top-boundary isotropic illumination (W/m^2)
+        #     "fbeam": self.fbeam #Intensity of incidence parallel beam Solar flux (W/m^2)
+        # }
 
         #Need to interpolate temperature field to be at boundaries of computational layers, rather than at the center.
         #Assuming that the temperature grid is sufficiently dense to allow for a fast linear interpolation.
@@ -478,7 +491,7 @@ class DisortRTESolver:
             T_tensor = torch.tensor(T_interp)
 
         #Run disort. Result returns up and down total fluxes. 
-        result = self.ds.forward(self.prop,'', T_tensor, **bc)
+        result = self.ds.forward(self.prop,'', T_tensor, **self.bc)
         if self.is_multi_wave:
             fl_up = result[:,:,0,0].numpy() #total upwards diffuse flux from top layer, for rough surface scattering modeling. 
         else:
@@ -502,7 +515,7 @@ class DisortRTESolver:
         if(self.output_radiance):
             #Just return the radiance as viewed by the observer, currently fixed at zenith. 
             rad = self.ds.gather_rad() #rad[nwave,ncol,ndepth,n_obs_direction mu, n_obs_direction phi]
-            return(rad[:,:,0,:,:])
+            return(rad[:,:,0,:,:],fl_up)
         else:
             #Get flux divergence. 
             flx = self.ds.gather_flx() #flx[nwave,ncol,ndepth,8 properties] See table above for list of properties. 
@@ -543,3 +556,4 @@ class DisortRTESolver:
 
 def calculate_interface_T(T,i,alpha,beta):
     return((alpha*T[i] + beta*T[i+1])/(alpha + beta))
+

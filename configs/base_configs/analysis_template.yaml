@@ -1,0 +1,129 @@
+# Thermal Model Configuration for generic
+# Generated automatically - modify as needed
+
+simulation_metadata:
+  description: Default thermal model configuration for generic
+solver_settings:
+  use_RTE: true
+  RTE_solver: disort
+  diurnal: true
+  sun: true
+  T_fixed: false
+output_settings:
+  freq_out: 48
+  last_day: true
+  compute_observer_radiance: true
+  observer_mu: np.cos(np.radians(0.0))
+disort_spectral_modes:
+  thermal_evolution_mode: two_wave
+  output_radiance_mode: hybrid
+optical_properties_rte:
+  Et: 1000.0
+  eta: 1.0
+  ssalb_vis: 0.06
+  ssalb_therm: 0.1
+  g_vis: 0.0
+  g_therm: 0.0
+  R_base: 0.0
+optical_properties_non_rte:
+  em: 0.98
+  albedo: 0.12
+planetary_properties:
+  R: 1.0
+  S: 1366.0
+  latitude: np.radians(0.0)
+  dec: np.radians(0.0)
+  P: 15450
+  steady_state_mu: np.cos(np.radians(0.0))
+surface_roughness:
+  crater: false
+  illum_freq: 1
+  compute_crater_radiance: false
+  observer_vectors:
+    overhead:
+      x: 0.0
+      y: 0.0
+      z: 1.0
+      description: Observer direction vector [0, 0, 1]
+    east_1.0_deg:
+      x: 1.0
+      y: 0.0
+      z: 1.0
+      description: Observer direction vector [1, 0, 1]
+    north_1.0_deg:
+      x: 0.0
+      y: 1.0
+      z: 1.0
+      description: Observer direction vector [0, 1, 1]
+material_properties_dust:
+  single_layer: true
+  dust_thickness: 1.0
+  k_dust: 0.00055
+  rho_dust: 1100.0
+  cp_dust: 825.0
+  k_dust_auto: false
+material_properties_rock:
+  rock_thickness: 1.0
+  k_rock: 1.0
+  rho_rock: 2000.0
+  cp_rock: 700.0
+boundary_conditions:
+  T_bottom: 260.0
+  bottom_bc: neumann
+grid_settings:
+  auto_thickness: true
+  flay: 0.1
+  geometric_spacing: true
+  spacing_factor: 1.05
+  min_nlay_dust: 12
+  rock_lthick_fac: 0.2
+  dust_rte_max_lthick: 0.05
+time_stepping:
+  ndays: 2
+  auto_dt: true
+  tsteps_day: 16000
+  dtfac: 50.0
+  minsteps: 10000
+disort_parameters:
+  nmom: 4
+  nstr: 4
+  hybrid_wavelength_cutoff: 3.33
+  mie_file: /Users/ryan/Research/RT_models/RT_thermal_model/Preprocessing/quartz_spitzer_combined_15um_mie.txt
+  solar_spectrum_file: /Users/ryan/Research/RT_models/RT_thermal_model/Preprocessing/solar_integrated_32.txt
+  wn_bounds: /Users/ryan/Research/RT_models/RT_thermal_model/Preprocessing/quartz_spitzer_wn_bounds.txt
+  substrate_spectrum: /Users/ryan/Research/RT_models/RT_thermal_model/Preprocessing/Orgueil_P11442_VEH_32wns.txt
+  use_spec: false
+  fill_frac: 0.63
+  radius: 1.5e-05
+disort_output_settings:
+  mie_file_out: /Users/ryan/Research/RT_models/RT_thermal_model/Preprocessing/quartz_spitzer_combined_15um_mie.txt
+  solar_spectrum_file_out: /Users/ryan/Research/RT_models/RT_thermal_model/Preprocessing/solar_integrated_216.txt
+  wn_bounds_out: /Users/ryan/Research/RT_models/RT_thermal_model/Preprocessing/quartz_spitzer_wn_bounds.txt
+  substrate_spectrum_out: /Users/ryan/Research/RT_models/RT_thermal_model/Preprocessing/sabel_enstatite.txt
+  otesT1_out: /Users/ryan/Research/RT_models/RT_thermal_model/Preprocessing/Bennu_Type1_216wns.txt
+  otesT2_out: /Users/ryan/Research/RT_models/RT_thermal_model/Preprocessing/Bennu_Type2_216wns.txt
+  nstr_out: 16
+  nmom_out: 16
+disort_visible_properties:
+  force_vis_disort: false
+disort_depth_dependent:
+  depth_dependent: false
+physical_constants:
+  sigma: 5.670373e-08
+advanced_solver_settings:
+  steady_tol: 0.0001
+  bvp_tol: 1.0e-08
+  bvp_max_iter: 300
+  T_surf_tol: 0.0001
+  T_surf_max_iter: 50
+  disort_space_temp: 0.0
+  dust_lthick: 0.02
+  rock_lthick: 0.0025
+diurnal_convergence_settings:
+  enable_diurnal_convergence: false
+  diurnal_convergence_method: temperature
+  diurnal_convergence_temp_tol: 0.0001
+  diurnal_convergence_energy_tol: 0.001
+  diurnal_convergence_min_cycles: 2
+  diurnal_convergence_check_interval: 1
+  diurnal_convergence_window: 3
