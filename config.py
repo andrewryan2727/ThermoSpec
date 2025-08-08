@@ -34,16 +34,16 @@ class SimulationConfig:
     # Basic optical properties for RTE
     Et: float = 1000.0              # thermal extinction coefficient (m^-1)
     eta: float = 1.0                 # visible/thermal extinction coefficient ratio     
-    ssalb_vis: float = 0.06           # single-scattering visible albedo
-    ssalb_therm: float = 0.1         # single-scattering visible albedo. Influences the overall effective emissivity of the regolith bed. ssalb_therm=0.1 leads to emissivity ~0.95. 
+    ssalb_vis: float = 0.0           # single-scattering visible albedo
+    ssalb_therm: float = 0.0         # single-scattering visible albedo. Influences the overall effective emissivity of the regolith bed. ssalb_therm=0.1 leads to emissivity ~0.95. 
     g_vis: float = 0.0               # disort Scattering assymetry parameter for thermal spectrum in disort (not used for multi-wave)
     g_therm: float = 0.0             # disort Scattering assymetry parameter for visible spectrum in disort (not used for multi-wave)
     R_base: float = 0.0              # Substrate reflectivity for 2-layer model (DISORT only). Overridden by substrate_spectrum if use_spec=True in non-broadband cases. 
 
     
     #Non-RTE optical properties
-    em: float = 0.98                 # Surface thermal emissivity, ONLY USED FOR NON-RTE MODELS, 0.90
-    albedo: float = 0.12             # Surface bond albedo, ONLY USED FOR NON-RTE MODELS, 0.0178
+    em: float = 1.0                 # Surface thermal emissivity, ONLY USED FOR NON-RTE MODELS, 0.90
+    albedo: float = 0.0             # Surface bond albedo, ONLY USED FOR NON-RTE MODELS, 0.0178
 
     # Planetary properties
     R: float = 1.0                   # heliocentric distance (AU)
@@ -142,7 +142,7 @@ class SimulationConfig:
     enable_diurnal_convergence: bool = False  # Master enable/disable flag for automatic diurnal convergence
     diurnal_convergence_method: str = 'temperature'  # Convergence method: 'energy', 'temperature', or 'both'
     diurnal_convergence_temp_tol: float = 1.0e-4  # Temperature change tolerance (K) - Kieffer 2013 method
-    diurnal_convergence_energy_tol: float = 1.0e-3  # Energy balance tolerance (fractional) - Rozitis & Green 2011 method
+    diurnal_convergence_energy_tol: float = 0.05  # Energy balance tolerance (fractional) - Rozitis & Green 2011 method
     diurnal_convergence_min_cycles: int = 2  # Minimum number of cycles before checking convergence
     diurnal_convergence_check_interval: int = 1  # Check convergence every N cycles
     diurnal_convergence_window: int = 3  # Number of previous cycles to average over for convergence check
