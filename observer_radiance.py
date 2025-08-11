@@ -1,406 +1,167 @@
+"""
+DEPRECATED: This module has been moved to radiance_processor.py
+
+All crater radiance functionality has been consolidated into the unified radiance processing system.
+Please update your imports to use radiance_processor instead.
+
+This file provides backward compatibility imports but will be removed in a future version.
+"""
+
+import warnings
 import numpy as np
-from rte_disort import DisortRTESolver
-from config import SimulationConfig
-from grid import LayerGrid
-from crater import CraterRadiativeTransfer, compute_multiple_scattered_sunlight
+from typing import List, Dict, Any, Optional, Tuple, Union
 
-class ObserverRadianceCalculator:
-    """
-    Calculate summed crater radiance as seen by observers at different geometries.
-    Creates DISORT instances dynamically for each facet with correct viewing angles.
-    """
-    
-    def __init__(self, cfg: SimulationConfig, grid: LayerGrid, observer_vectors):
-        """
-        Store configuration and observer vectors for dynamic DISORT creation.
-        
-        Args:
-            cfg: Simulation configuration
-            grid: Spatial grid
-            observer_vectors: list of [x,y,z] observer direction vectors
-        """
-        self.cfg = cfg
-        self.grid = grid
-        self.observer_vectors = [np.array(vec) / np.linalg.norm(vec) for vec in observer_vectors]
-        
-        # Store observers without pre-creating DISORT instances
-        self.observers = []
-        for obs_vec in self.observer_vectors:
-            self.observers.append({'vector': obs_vec})
-    
-    def compute_facet_visibility(self, crater_shadowtester, observer_vec):
-        """
-        Use existing ShadowTester to determine facet visibility from observer.
-        
-        Args:
-            crater_shadowtester: ShadowTester instance from crater module
-            observer_vec: normalized observer direction vector [x,y,z]
-            
-        Returns:
-            visibility: fractional visibility (0-1) for each facet
-        """
-        # Use the existing illuminated_facets method with observer vector instead of sun vector
-        return crater_shadowtester.illuminated_facets(observer_vec)
-    
-    def compute_facet_observer_angles(self, crater_mesh, observer_vec):
-        """
-        Calculate local viewing angles for each facet relative to observer.
-        Uses precomputed local coordinate system from crater_mesh for consistency.
-        
-        Args:
-            crater_mesh: CraterMesh object with precomputed tangent vectors
-            observer_vec: normalized observer direction vector
-            
-        Returns:
-            facet_mu: cosine of local viewing angle for each facet
-            facet_phi: local azimuth angle for each facet (in facet reference frame)
-        """
-        # Dot product for mu
-        facet_mu = np.dot(crater_mesh.normals, observer_vec)
-        facet_mu[facet_mu < 0] = 0.0
-        
-        # Use precomputed tangent vectors for phi calculation
-        facet_phi = np.zeros(len(crater_mesh.normals))
-        
-        for i in range(len(crater_mesh.normals)):
-            if facet_mu[i] <= 0:
-                continue
-                
-            # Project observer into facet plane
-            obs_in_plane = observer_vec - facet_mu[i] * crater_mesh.normals[i]
-            obs_in_plane_norm = np.linalg.norm(obs_in_plane)
-            
-            if obs_in_plane_norm > 1e-10:
-                obs_in_plane = obs_in_plane / obs_in_plane_norm
-                cos_phi = np.dot(obs_in_plane, crater_mesh.tangent1[i])
-                sin_phi = np.dot(obs_in_plane, crater_mesh.tangent2[i])
-                facet_phi[i] = np.arctan2(sin_phi, cos_phi)
-                if facet_phi[i] < 0:
-                    facet_phi[i] += 2 * np.pi
-            else:
-                # Observer is along the normal direction, phi is arbitrary
-                facet_phi[i] = 0.0
-        
-        return facet_mu, facet_phi
-    
-    def create_disort_for_facet(self, mu, phi):
-        """
-        Create DISORT instances for a specific viewing geometry.
-        
-        Args:
-            mu: cosine of viewing angle
-            phi: azimuth angle (radians)
-            
-        Returns:
-            tuple: (disort_thermal, disort_vis) instances
-        """
-        disort_thermal = DisortRTESolver(self.cfg, self.grid, n_cols=1,
-                                       output_radiance=True, planck=True,
-                                       observer_mu=mu, observer_phi=phi, solver_mode=self.cfg.output_radiance_mode, spectral_component='thermal_only')
-        
-        disort_vis = None
-        # if self.cfg.output_radiance_mode in ['two_wave', 'hybrid']:
-        #     disort_vis = DisortRTESolver(self.cfg, self.grid, n_cols=1,
-        #                                output_radiance=True, planck=False,
-        #                                observer_mu=mu, observer_phi=phi,
-        #                                solver_mode=self.cfg.output_radiance_mode, 
-        #                                spectral_component='visible_only')
-        
-        return disort_thermal, disort_vis
-    
-    def compute_crater_radiance(self, T_crater_facets, crater_mesh, crater_shadowtester, 
-                               observer_idx, mu_sun=0.0, F_sun=0.0, sun_vec=None, 
-                               crater_radtrans=None, therm_flux_facets=None, 
-                               illuminated=None, albedo=None, emissivity=None):
-        """
-        Calculate total crater radiance as seen by a specific observer.
-        Creates DISORT instances dynamically for each facet with correct viewing angles.
-        
-        Args:
-            T_crater_facets: temperature profiles for all facets [depth, n_facets]
-            crater_mesh: CraterMesh object
-            crater_shadowtester: ShadowTester object 
-            observer_idx: index of observer
-            mu_sun: solar cosine (for scattered light calculation)
-            F_sun: solar illumination flag
-            sun_vec: solar direction vector [x, y, z] (for scattered light calculation)
-            crater_radtrans: CraterRadiativeTransfer object (for scattered light)
-            therm_flux_facets: thermal flux from all facets [n_facets, n_waves]
-            illuminated: illuminated fraction for each facet [n_facets]
-            albedo: surface albedo (scalar or array)
-            emissivity: surface emissivity (scalar or array)
-            
-        Returns:
-            total_radiance: area-weighted summed radiance from all visible facets
-                          - For multi_wave: array of shape [n_waves]
-                          - For two-wave: scalar value
-        """
-        observer_vec = self.observers[observer_idx]['vector']
-        
-        # Get fractional visibility for each facet using existing ShadowTester
-        visibility = self.compute_facet_visibility(crater_shadowtester, observer_vec)
-        
-        # Get local viewing angles for each facet
-        facet_mu, facet_phi = self.compute_facet_observer_angles(crater_mesh, observer_vec)
-        
-        # Initialize radiance arrays based on output_radiance_mode
-        if self.cfg.output_radiance_mode == 'multi_wave':
-            # We need to get n_waves by creating a temporary DISORT instance
-            temp_disort = DisortRTESolver(self.cfg, self.grid, n_cols=1, output_radiance=True, planck=True,
-                                        solver_mode=self.cfg.output_radiance_mode)
-            n_waves = len(temp_disort.wavenumbers)
-            total_radiance = np.zeros(n_waves)
-        elif self.cfg.output_radiance_mode == 'hybrid':
-            # Hybrid mode: thermal wavelengths only
-            temp_disort = DisortRTESolver(self.cfg, self.grid, n_cols=1, output_radiance=True, planck=True,
-                                        solver_mode=self.cfg.output_radiance_mode, spectral_component='thermal_only')
-            n_waves = len(temp_disort.wavenumbers)
-            total_radiance = np.zeros(n_waves)
-        else:
-            n_waves = 1
-            total_radiance = 0.0
-        
-        # Calculate scattered energy incident upon the surface (Q_scat and Q_selfheat)
-        Q_scat_facets = np.zeros((len(crater_mesh.normals), n_waves))
-        Q_selfheat_facets = np.zeros((len(crater_mesh.normals), n_waves))
-        
-        if (crater_radtrans is not None and sun_vec is not None and 
-            illuminated is not None and albedo is not None and 
-            therm_flux_facets is not None):
-            
-            # Calculate scattered solar energy and self-heating for all facets
-            _, Q_scat_all, Q_selfheat_all, _ = crater_radtrans.compute_fluxes(
-                sun_vec, illuminated, therm_flux_facets, albedo, emissivity, 
-                F_sun, n_waves, multiple_scatter=True
-            )
-            
-            # Convert to intensity by dividing by pi (as done in main model)
-            if n_waves == 1:
-                Q_scat_facets[:, 0] = Q_scat_all / np.pi
-                Q_selfheat_facets[:, 0] = Q_selfheat_all / np.pi
-            else:
-                Q_scat_facets = Q_scat_all / np.pi
-                Q_selfheat_facets = Q_selfheat_all / np.pi
-            
-        total_projected_area = 0.0
-        
-        # Performance optimization option: use batch DISORT calculation
-        use_batch_disort = False  # Set to False to use original per-facet method for comparison
-        
-        if use_batch_disort:
-            # NEW METHOD: Single DISORT run with all facet angles
-            print("Using batch DISORT calculation for all facets...")
-            
-            # Filter out non-visible facets
-            visible_facets = []
-            visible_mu = []
-            visible_phi = []
-            visible_indices = []
-            
-            for i in range(len(crater_mesh.normals)):
-                if visibility[i] > 0 and facet_mu[i] > 0:
-                    visible_facets.append(i)
-                    visible_mu.append(facet_mu[i])
-                    visible_phi.append(facet_phi[i])
-                    visible_indices.append(i)
-            
-            if len(visible_facets) > 0:
-                # Create temperature array for all visible facets [depth, n_visible_facets]
-                T_visible = T_crater_facets[:, visible_facets]
-                
-                # Create single DISORT instance with all observer angles
-                if self.cfg.output_radiance_mode in ['multi_wave', 'hybrid']:
-                    # Create thermal solver with all observer angles
-                    disort_batch = DisortRTESolver(self.cfg, self.grid, n_cols=len(visible_facets),
-                                                 output_radiance=True, planck=True,
-                                                 observer_mu=np.sort(np.array(visible_mu)), 
-                                                 observer_phi=np.array(visible_phi),
-                                                 solver_mode=self.cfg.output_radiance_mode, 
-                                                 spectral_component='thermal_only')
-                    
-                    # Prepare Q arrays for all visible facets
-                    if n_waves == 1:
-                        Q_therm_batch = np.array([Q_selfheat_facets[i, 0] for i in visible_facets])
-                        Q_vis_batch = np.array([Q_scat_facets[i, 0] for i in visible_facets])
-                    else:
-                        Q_therm_batch = Q_selfheat_facets[visible_facets, :].T  # [n_waves, n_facets]
-                        Q_vis_batch = Q_scat_facets[visible_facets, :].T  # [n_waves, n_facets]
-                    
-                    if self.cfg.output_radiance_mode == 'multi_wave':
-                        Q_total_batch = Q_therm_batch + Q_vis_batch
-                        radiances_batch, _ = disort_batch.disort_run(T_visible, mu_sun, F_sun, Q=Q_total_batch)
-                    else:  # hybrid
-                        radiances_batch, _ = disort_batch.disort_run(T_visible, 0.0, 0.0, Q=Q_therm_batch)
-                    
-                    # Extract radiance for each facet at its corresponding observer angle
-                    # radiances_batch shape: [n_waves, n_facets, n_depth, n_mu, n_phi]
-                    # We want radiance at mu_index=i, phi_index=i for facet i
-                    for idx, facet_i in enumerate(visible_facets):
-                        # Get radiance at surface (depth=0) for this facet's observer angle
-                        if radiances_batch.ndim == 4:  # [n_waves, n_facets, n_depth, n_mu, n_phi]
-                            facet_radiance = radiances_batch[:, idx, idx, idx]  # [n_waves]
-                        elif radiances_batch.ndim == 3:  # [n_facets, n_depth, n_mu, n_phi] for single wave
-                            facet_radiance = radiances_batch[idx, idx, idx]  # scalar
-                        else:
-                            print(f"Unexpected radiance shape: {radiances_batch.shape}")
-                            facet_radiance = np.zeros(n_waves) if n_waves > 1 else 0.0
-                        
-                        # Weight by facet area, projected area, and visibility
-                        facet_area = crater_mesh.areas[facet_i]
-                        projected_area = facet_area * facet_mu[facet_i] * visibility[facet_i]
-                        
-                        total_radiance += facet_radiance * projected_area
-                        total_projected_area += projected_area
-                
-                else:
-                    # Two-wave case with batch processing
-                    disort_thermal_batch = DisortRTESolver(self.cfg, self.grid, n_cols=len(visible_facets),
-                                                         output_radiance=True, planck=True,solver_mode=self.cfg.output_radiance_mode,
-                                                         observer_mu=np.array(visible_mu), 
-                                                         observer_phi=np.array(visible_phi),spectral_component='thermal_only')
-                    
-                    Q_therm_batch = np.array([Q_selfheat_facets[i, 0] for i in visible_facets])
-                    radiances_thermal, _ = disort_thermal_batch.disort_run(T_visible, mu_sun, F_sun, Q=Q_therm_batch)
-                    
-                    # Extract radiance for each facet
-                    for idx, facet_i in enumerate(visible_facets):
-                        if radiances_thermal.ndim == 4:  # [n_facets, n_depth, n_mu, n_phi]
-                            facet_radiance = radiances_thermal[idx, 0, idx, idx]
-                        else:
-                            facet_radiance = 0.0
-                        
-                        # Weight by facet area, projected area, and visibility
-                        facet_area = crater_mesh.areas[facet_i]
-                        projected_area = facet_area * facet_mu[facet_i] * visibility[facet_i]
-                        
-                        total_radiance += facet_radiance * projected_area
-                        total_projected_area += projected_area
-            
-            print(f"Batch DISORT calculation completed for {len(visible_facets)} visible facets.")
-        
-        else:
-            # ORIGINAL METHOD: Individual DISORT instances for each facet (preserved for comparison)
-            print("Using original per-facet DISORT calculation...")
-            for i in range(len(crater_mesh.normals)):
-                # Skip facets that are not visible or facing away from observer
-                if visibility[i] <= 0 or facet_mu[i] <= 0:
-                    continue
-                    
-                # Temperature profile for this facet
-                T_facet = T_crater_facets[:, i]
-                
-                # Create DISORT instances for this facet's local viewing angles
-                try:
-                    disort_thermal, disort_vis = self.create_disort_for_facet(facet_mu[i], facet_phi[i])
-                    
-                    # Get total scattered energy for this facet (Q_scat + Q_selfheat)
-                    if n_waves == 1:
-                        Q_vis = Q_scat_facets[i, 0]
-                        Q_therm = Q_selfheat_facets[i, 0]
-                    else:
-                        Q_vis = Q_scat_facets[i, :]
-                        Q_therm = Q_selfheat_facets[i, :]
-                    Q_total = Q_vis + Q_therm
+# Issue deprecation warning
+warnings.warn(
+    "observer_radiance.py is deprecated and will be removed in a future version. "
+    "Use radiance_processor module instead:\n\n"
+    "OLD: from observer_radiance import ObserverRadianceCalculator\n"
+    "NEW: from radiance_processor import CraterRadianceProcessor\n\n"
+    "Or use the high-level functions:\n"
+    "- calculate_crater_radiance_from_sim()\n"
+    "- calculate_dual_radiance_from_sim()\n"
+    "- calculate_radiances_from_results() with surface_type='crater'",
+    DeprecationWarning,
+    stacklevel=2
+)
 
-                    
-                    # Calculate radiance from this facet using facet-specific DISORT with scattered energy
-                    if self.cfg.output_radiance_mode in ['multi_wave', 'hybrid']:
-                        # Multi-wave or hybrid case: return spectral radiance
-                        if self.cfg.output_radiance_mode == 'multi_wave':
-                            radiance, _ = disort_thermal.disort_run(T_facet, mu_sun, F_sun, Q=Q_total)
-                        else:
-                            # Hybrid mode: thermal wavelengths only, no sun. 
-                            radiance, _ = disort_thermal.disort_run(T_facet, 0.0, 0.0, Q=Q_therm)
-                        if hasattr(radiance, 'numpy'):
-                            radiance = radiance.numpy()
-                        # radiance should be shape [n_waves] or [n_waves, 1]
-                        if radiance.ndim > 1:
-                            facet_radiance = radiance[:, 0,0,0]  # Take first column if 2D
-                        else:
-                            facet_radiance = radiance
-                    else:
-                        # Two-wave case: thermal + visible, return single value
-                        rad_thermal, _ = disort_thermal.disort_run(T_facet, mu_sun, F_sun, Q=Q_therm)
-                        #rad_vis = disort_vis.disort_run(T_facet, mu_sun, F_sun, Q=Q_vis)
-                        
-                        if hasattr(rad_thermal, 'numpy'):
-                            rad_thermal = rad_thermal.numpy()
-                        # if hasattr(rad_vis, 'numpy'):
-                        #     rad_vis = rad_vis.numpy()
-                            
-                        # Ensure scalar values
-                        rad_thermal = rad_thermal.item() if hasattr(rad_thermal, 'item') else rad_thermal
-                        #rad_vis = rad_vis.item() if hasattr(rad_vis, 'item') else rad_vis
-                        facet_radiance = rad_thermal
-                        
-                except Exception as e:
-                    print(f"Warning: DISORT failed for facet {i} (mu={facet_mu[i]:.3f}, phi={facet_phi[i]:.3f}): {e}")
-                    if self.cfg.output_radiance_mode in ['multi_wave', 'hybrid']:
-                        facet_radiance = np.zeros(n_waves)
-                    else:
-                        facet_radiance = 0.0
-                
-                # Weight by facet area, projected area (cosine factor), and visibility
-                facet_area = crater_mesh.areas[i]
-                projected_area = facet_area * facet_mu[i] * visibility[i]
-                
-                total_radiance += facet_radiance * projected_area
-                total_projected_area += projected_area
-            print("Finished individual facet loop.")
-        
-        # Return area-averaged radiance
-        if total_projected_area > 0:
-            return total_radiance / total_projected_area
-        else:
-            if self.cfg.output_radiance_mode in ['multi_wave', 'hybrid']:
-                return np.zeros(n_waves)
-            else:
-                return 0.0
-    
-    def compute_all_observers(self, T_crater_facets, crater_mesh, crater_shadowtester,
-                            mu_sun=0.0, F_sun=0.0, sun_vec=None, crater_radtrans=None, 
-                            therm_flux_facets=None, illuminated=None, albedo=None, 
-                            emissivity=None):
+# Import the new classes for backward compatibility
+try:
+    from radiance_processor import CraterRadianceProcessor as ObserverRadianceCalculator
+    from radiance_processor import (
+        calculate_crater_radiance_from_sim,
+        calculate_dual_radiance_from_sim, 
+        extract_crater_data_from_sim,
+        calculate_radiances_from_results
+    )
+
+    # Make sure the backward compatible class has the same interface
+    class ObserverRadianceCalculator(CraterRadianceProcessor):
         """
-        Calculate crater radiance for all observers.
-        
-        Args:
-            T_crater_facets: temperature profiles [depth, n_facets]
-            crater_mesh: CraterMesh object
-            crater_shadowtester: ShadowTester object
-            mu_sun: solar cosine
-            F_sun: solar illumination flag
-            sun_vec: solar direction vector [x, y, z] (for scattered light calculation)
-            crater_radtrans: CraterRadiativeTransfer object (for scattered light)
-            therm_flux_facets: thermal flux from all facets [n_facets, n_waves]
-            illuminated: illuminated fraction for each facet [n_facets]
-            albedo: surface albedo (scalar or array)
-            emissivity: surface emissivity (scalar or array)
-            
-        Returns:
-            radiances: array of radiance for each observer
-                      - For multi_wave: shape [n_observers, n_waves]  
-                      - For two-wave: shape [n_observers]
+        DEPRECATED: Use CraterRadianceProcessor from radiance_processor module instead.
+
+        This class provides backward compatibility but will be removed in a future version.
         """
-        if self.cfg.output_radiance_mode == 'multi_wave':
-            # Get number of wavelengths by creating a temporary DISORT instance
-            temp_disort = DisortRTESolver(self.cfg, self.grid, n_cols=1, output_radiance=True, planck=True,
-                                        solver_mode=self.cfg.output_radiance_mode)
-            n_waves = len(temp_disort.wavenumbers)
-            radiances = np.zeros((len(self.observers), n_waves))
-        elif self.cfg.output_radiance_mode == 'hybrid':
-            # Hybrid mode: thermal wavelengths only
-            temp_disort = DisortRTESolver(self.cfg, self.grid, n_cols=1, output_radiance=True, planck=True,
-                                        solver_mode=self.cfg.output_radiance_mode, spectral_component='thermal_only')
-            n_waves = len(temp_disort.wavenumbers)
-            radiances = np.zeros((len(self.observers), n_waves))
-        else:
-            radiances = np.zeros(len(self.observers))
-        
-        for i in range(len(self.observers)):
-            radiances[i] = self.compute_crater_radiance(
-                T_crater_facets, crater_mesh, crater_shadowtester, i, mu_sun, F_sun,
-                sun_vec, crater_radtrans, therm_flux_facets, illuminated, albedo, emissivity
+
+        def __init__(self, cfg, grid, observer_vectors):
+            # Issue another deprecation warning when instantiated
+            warnings.warn(
+                "ObserverRadianceCalculator is deprecated. Use CraterRadianceProcessor from radiance_processor instead.",
+                DeprecationWarning,
+                stacklevel=2
             )
-            
-        return radiances
+            # Call parent constructor with renamed parameters to match new interface
+            super().__init__(config=cfg, grid=grid, observer_vectors=observer_vectors)
+
+            # Store old parameter names for backward compatibility
+            self.cfg = cfg
+
+except ImportError as e:
+    # Fallback if there are import issues
+    warnings.warn(
+        f"Could not import from radiance_processor: {e}. "
+        "Please ensure radiance_processor.py is available and properly configured.",
+        ImportWarning,
+        stacklevel=2
+    )
+    
+    # Define a placeholder class that raises an informative error
+    class ObserverRadianceCalculator:
+        def __init__(self, *args, **kwargs):
+            raise ImportError(
+                "ObserverRadianceCalculator is deprecated and the new radiance_processor module "
+                "could not be imported. Please check your installation and update your code to use "
+                "the new radiance processing interface."
+            )
+    
+    # Define placeholder functions
+    def calculate_crater_radiance_from_sim(*args, **kwargs):
+        raise ImportError("radiance_processor module could not be imported")
+        
+    def calculate_dual_radiance_from_sim(*args, **kwargs):
+        raise ImportError("radiance_processor module could not be imported")
+        
+    def extract_crater_data_from_sim(*args, **kwargs):
+        raise ImportError("radiance_processor module could not be imported")
+        
+    def calculate_radiances_from_results(*args, **kwargs):
+        raise ImportError("radiance_processor module could not be imported")
+
+
+# Additional backward compatibility aliases
+ObserverRadiance = ObserverRadianceCalculator  # Alternative name that might have been used
+
+
+def migration_guide():
+    """
+    Print a migration guide for updating code from observer_radiance to radiance_processor.
+    """
+    print("""
+MIGRATION GUIDE: observer_radiance.py → radiance_processor.py
+================================================================
+
+The crater radiance functionality has been moved to a unified radiance processing system.
+
+OLD CODE:
+---------
+from observer_radiance import ObserverRadianceCalculator
+
+# Create calculator
+calc = ObserverRadianceCalculator(cfg, grid, observer_vectors)
+
+# Calculate crater radiance
+radiances = calc.compute_all_observers(
+    T_crater_facets, crater_mesh, crater_shadowtester, 
+    mu_sun, F_sun, sun_vec, crater_radtrans, 
+    therm_flux_facets, illuminated, albedo, emissivity
+)
+
+NEW CODE (Option 1 - High-level functions):
+-------------------------------------------
+from radiance_processor import calculate_crater_radiance_from_sim
+
+# Calculate directly from simulation object
+crater_results = calculate_crater_radiance_from_sim(
+    sim, observer_vectors, spectral_mode='hybrid'
+)
+
+NEW CODE (Option 2 - Low-level interface):
+------------------------------------------
+from radiance_processor import CraterRadianceProcessor
+
+# Create processor (note: parameter names changed)
+processor = CraterRadianceProcessor(config=cfg, grid=grid, observer_vectors=observer_vectors)
+
+# Calculate crater radiance (same interface)
+radiances = processor.compute_all_observers(
+    T_crater_facets, crater_mesh, crater_shadowtester,
+    mu_sun, F_sun, sun_vec, crater_radtrans,
+    therm_flux_facets, illuminated, albedo, emissivity
+)
+
+NEW CODE (Option 3 - Unified interface with dual outputs):
+----------------------------------------------------------
+from radiance_processor import calculate_radiances_from_results
+
+# Calculate both smooth and crater radiance
+dual_results = calculate_radiances_from_results(
+    thermal_results, config,
+    surface_type='both',
+    observer_angles=[0, 30, 60],  # For smooth surface
+    observer_vectors=[[0,0,1], [0.5,0,1]],  # For crater
+    crater_data=crater_data
+)
+
+BENEFITS OF NEW SYSTEM:
+-----------------------
+✓ Unified interface for all radiance calculations
+✓ Support for dual outputs (crater + smooth comparison)  
+✓ Better integration with post-processing workflows
+✓ Consistent spectral mode handling
+✓ Enhanced documentation and examples
+
+""")
+
+
+if __name__ == "__main__":
+    migration_guide()

@@ -24,8 +24,8 @@ class SimulationConfig:
     # Output settings
     freq_out: int = 48              # Number of outputs per diurnal cycle. 
     last_day: bool = True            # If True, only output last day of simulation. Otherwise, output data from all days.
-    compute_observer_radiance: bool = False  # Calculate observer radiance outputs
-    observer_mu: int = np.cos(np.radians(0.0)) #Observer cosine angle for flat model radiance outputs. 
+    compute_observer_radiance: bool = False  # DEPRECATED: Use radiance_processor module for post-processing instead
+    observer_mu: int = np.cos(np.radians(0.0)) #Observer cosine angle for radiance post-processing 
     
     # DISORT Spectral Mode Configuration
     thermal_evolution_mode: str = 'two_wave'    # Thermal evolution solver mode: 'two_wave', 'multi_wave', 'hybrid'
@@ -59,6 +59,8 @@ class SimulationConfig:
     compute_crater_radiance: bool = False  # Calculate crater radiance as seen by observers. Computationally expensive!
     #observer_vectors: list = field(default_factory=lambda: [[0, 0, 1],[0.5,0,1],[0.7,0,1], [-0.5,0,1], [-0.7,0,1]])  # List of [x,y,z] observer direction vectors (default: overhead)
     observer_vectors: list = field(default_factory=lambda: [[0, 0, 1],[1,0,1],[0,1,1]])
+    crater_mesh: str = '/Users/ryan/Research/RT_models/RT_thermal_model/Roughness_files/new_crater2.txt'
+    crater_selfheating: str = '/Users/ryan/Research/RT_models/RT_thermal_model/Roughness_files/new_crater2_selfheating_list.txt'
 
     # Dust (or top layer) material properties
     single_layer: bool = True        # use single-layer model instead of two-layer. If single layer, only dust properties are used. 

@@ -10,6 +10,7 @@ import scipy.integrate
 from scipy.optimize import nnls
 from scipy.optimize import differential_evolution
 import torch
+import warnings
 
 # -----------------------------------------------------------------------------
 # File: modelmain.py
@@ -36,8 +37,8 @@ class Simulator:
 		if self.cfg.crater:
 			from crater import CraterMesh, SelfHeatingList, ShadowTester, CraterRadiativeTransfer
 			# File paths can be set in config or hardcoded for now
-			self.crater_mesh = CraterMesh('Roughness_files/new_crater2.txt')
-			self.crater_selfheating = SelfHeatingList('Roughness_files/new_crater2_selfheating_list.txt')
+			self.crater_mesh = CraterMesh(self.cfg.crater_mesh)
+			self.crater_selfheating = SelfHeatingList(self.cfg.crater_selfheating)
 			self.crater_shadowtester = ShadowTester(self.crater_mesh)
 			self.crater_radtrans = CraterRadiativeTransfer(
 				self.crater_mesh, self.crater_selfheating)
@@ -52,13 +53,11 @@ class Simulator:
 			self.rte_hapke  = RadiativeTransfer(self.cfg, self.grid)
 		if(self.cfg.use_RTE and self.cfg.RTE_solver == 'disort'):
 			self._setup_thermal_evolution_solvers()
-			if self.cfg.compute_observer_radiance: 
-				self._setup_output_radiance_solvers()
 			if self.cfg.crater:
 				required_modes = set()
 				required_modes.add(self.cfg.thermal_evolution_mode)
-				required_modes.add(self.cfg.output_radiance_mode)
-				self._setup_spectral_flux_solvers(required_modes)
+				# Note: output radiance now handled by separate radiance_processor module
+				self._setup_spectral_flux_solvers({self.cfg.thermal_evolution_mode})
 				self._setup_crater_thermal_evolution_solvers() 
 		# Precompute time arrays and insolation flags
 		self._setup_time_arrays()
@@ -199,84 +198,7 @@ class Simulator:
 		
 		print(f"Crater thermal evolution mode: {mode}")
 
-	def _setup_output_radiance_solvers(self):
-		"""Initialize output radiance DISORT solvers based on output_radiance_mode."""
-		mode = self.cfg.output_radiance_mode
-
-		if mode == 'two_wave':
-			# Standard two-wave setup: separate thermal and visible
-			self.rte_disort_out = DisortRTESolver(self.cfg, self.grid, 
-											   solver_mode='two_wave', planck=True, 
-											   output_radiance=True, observer_mu=self.cfg.observer_mu)
-			self.rte_disort_vis_out = DisortRTESolver(self.cfg, self.grid, 
-													solver_mode='two_wave', planck=False,
-													output_radiance=True, observer_mu=self.cfg.observer_mu)
-			
-		elif mode == 'multi_wave':
-			# Full multi-wave setup: single solver for all wavelengths  
-			self.rte_disort_out = DisortRTESolver(self.cfg, self.grid, 
-											   solver_mode='multi_wave',
-											   output_radiance=True, observer_mu=self.cfg.observer_mu)
-			# No visible solver needed in multi_wave mode
-			self.rte_disort_vis_out = None
-			
-		elif mode == 'hybrid':
-			# Hybrid setup: multi-wave thermal + broadband visible
-			self.rte_disort_out = DisortRTESolver(self.cfg, self.grid,
-											   solver_mode='hybrid', 
-											   spectral_component='thermal_only',
-											   output_radiance=True, observer_mu=self.cfg.observer_mu)
-			self.rte_disort_vis_out = DisortRTESolver(self.cfg, self.grid,
-													solver_mode='hybrid',
-													spectral_component='visible_only',planck=False,
-													output_radiance=True, observer_mu=self.cfg.observer_mu)
-		else:
-			raise ValueError(f"Unknown output_radiance_mode: {mode}")
-		if hasattr(self.rte_disort_out,'wavenumbers') :
-			self.wavenumbers_out = self.rte_disort_out.wavenumbers
-		if hasattr(self.rte_disort_vis_out,'wavenumbers'):
-			self.wavenumbers_vis_out = self.rte_disort_vis_out.wavenumbers
-		
-		print(f"Output radiance mode: {mode}")
 	
-	def _setup_crater_output_radiance_solvers(self):
-		"""Initialize crater output radiance DISORT solvers based on output_radiance_mode."""
-		if not self.cfg.crater:
-			return
-			
-		mode = self.cfg.output_radiance_mode
-		
-		if mode == 'two_wave':
-			# Standard two-wave setup: separate thermal and visible for all facets
-			self.rte_disort_out_crater = DisortRTESolver(self.cfg, self.grid, n_cols=self.n_facets,
-			                                           solver_mode='two_wave', planck=True, 
-			                                           output_radiance=True, observer_mu=self.cfg.observer_mu)
-			self.rte_disort_vis_out_crater = DisortRTESolver(self.cfg, self.grid, n_cols=self.n_facets,
-			                                                solver_mode='two_wave', planck=False,
-			                                                output_radiance=True, observer_mu=self.cfg.observer_mu)
-			
-		elif mode == 'multi_wave':
-			# Full multi-wave setup: single solver for all wavelengths and all facets
-			self.rte_disort_out_crater = DisortRTESolver(self.cfg, self.grid, n_cols=self.n_facets,
-			                                           solver_mode='multi_wave',
-			                                           output_radiance=True, observer_mu=self.cfg.observer_mu)
-			# No visible solver needed in multi_wave mode
-			self.rte_disort_vis_out_crater = None
-			
-		elif mode == 'hybrid':
-			# Hybrid setup: multi-wave thermal + broadband visible for all facets
-			self.rte_disort_out_crater = DisortRTESolver(self.cfg, self.grid, n_cols=self.n_facets,
-			                                           solver_mode='hybrid', 
-			                                           spectral_component='thermal_only',
-			                                           output_radiance=True, observer_mu=self.cfg.observer_mu)
-			self.rte_disort_vis_out_crater = DisortRTESolver(self.cfg, self.grid, n_cols=self.n_facets,
-			                                                solver_mode='hybrid',
-			                                                spectral_component='visible_only', planck=False,
-			                                                output_radiance=True, observer_mu=self.cfg.observer_mu)
-		else:
-			raise ValueError(f"Unknown output_radiance_mode: {mode}")
-		
-		print(f"Crater output radiance mode: {mode} (n_facets={self.n_facets})")
 	
 	def _setup_spectral_flux_solvers(self, modes):
 		"""Set up dedicated DISORT solvers for spectral flux calculations (albedo/emissivity)."""
@@ -789,185 +711,14 @@ class Simulator:
 					self.T_crater_out = T_crater_hist[:, :, -len(self.t_out):]
 					self.T_surf_crater_out = T_surf_crater_hist[:, -len(self.t_out):]
 
-	def _make_radiance_outputs(self):
-		"""Calculate radiance outputs using interpolated thermal data."""
-		non_diurnal = not self.cfg.diurnal
-		
-		# CALCULATE RADIANCE OUTPUTS
-		if(self.cfg.use_RTE and self.cfg.RTE_solver=='disort'):
-			#Reinitialize disort to get observer radiance values at output times. 
-			#The calculation of radiances is slower, hence we only do it at the end with our output temperature profiles. 
-			#This will trigger the loading of new optical constants files for multi-wave, which optionally can 
-			# be at a higher spectral resolution. 
-			self._setup_crater_output_radiance_solvers()
-			
-			# Initialize output arrays based on output_radiance_mode
-			if self.cfg.output_radiance_mode == 'multi_wave':
-				nwave = len(self.rte_disort_out.wavenumbers)
-				self.radiance_out = np.zeros((nwave,self.T_out.shape[1]))
-				self.flux_out = np.zeros((nwave,self.T_out.shape[1]))
-			elif self.cfg.output_radiance_mode == 'hybrid':
-				# Hybrid mode: thermal wavelengths + broadband visible
-				nwave_thermal = len(self.rte_disort_out.wavenumbers)
-				self.radiance_out = np.zeros((nwave_thermal,self.T_out.shape[1]))  # Thermal spectral radiance
-				self.radiance_out_vis = np.zeros(self.T_out.shape[1])             # Visible broadband radiance
-				self.flux_out = np.zeros((nwave_thermal,self.T_out.shape[1]))  # Thermal spectral flux
-				self.flux_out_vis = np.zeros(self.T_out.shape[1])               # Visible
-			else:  # two_wave mode
-				self.radiance_out = np.zeros(self.T_out.shape[1])
-				self.radiance_out_therm = np.zeros(self.T_out.shape[1])
-				self.radiance_out_vis = np.zeros(self.T_out.shape[1])
-				self.flux_out = np.zeros(self.T_out.shape[1])
-			self.rad_T_out = np.zeros(self.T_out.shape[1])  #Temperature computed from radiance blackbody fit. 
-			wn_bounds = np.sort(np.loadtxt(self.cfg.wn_bounds_out))
-			print("Computing DISORT radiance spectra for output.")
-			for idx in range(self.T_out.shape[1]):
-				if non_diurnal:
-					F = self.F_steady
-				else:
-					t_hist = np.array(self.t_history)
-					t = self.t_out[idx]
-					F_idx = np.argmin(np.abs(t_hist - t))
-					F = self.F_array[F_idx] #get nearest value for F. Don't want to interpolate and get a value that isn't 0 or 1. 
-				# Calculate output radiance based on output_radiance_mode
-				if self.cfg.output_radiance_mode == 'multi_wave':
-					# Multi-wave mode: single solver for all wavelengths
-					rad, fl_up = self.rte_disort_out.disort_run(self.T_out[:,idx],self.mu_out[idx],F)
-					self.radiance_out[:,idx] = rad.numpy()[:,0]
-					self.flux_out[:,idx] = fl_up[:,0].copy()
-					#self.rad_T_out[idx], _, _, _ = fit_blackbody_wn_banded(self,wn_bounds, rad.numpy()[:,0],idx=idx)
-					self.rad_T_out[idx], _, _, _ = max_btemp_blackbody(self, wn_bounds, self.radiance_out[:,idx], idx=idx)
-				elif self.cfg.output_radiance_mode == 'hybrid':
-					# Hybrid mode: multi-wave thermal only. 
-					rad_thermal, fl_up = self.rte_disort_out.disort_run(self.T_out[:,idx],0.0,0.0) #thermal only, no vis. mu=0, F = 0. 
-					#rad_vis, _ = self.rte_disort_vis_out.disort_run(self.T_out[:,idx],self.mu_out[idx],F)
-					self.radiance_out[:,idx] = rad_thermal[:,0,0,0].numpy()  # Store thermal spectral radiance
-					self.flux_out[:,idx] = fl_up[:,0].copy()  # Store thermal spectral flux
-					#self.radiance_out_vis[idx] = rad_vis.numpy()         # Store visible broadband radiance
-					#self.rad_T_out[idx], _, _, _ = fit_blackbody_wn_banded(self,wn_bounds, self.radiance_out[:,idx],idx=idx)
-					#T_max, B_max, brightness_temps, wn_edges = max_btemp_blackbody(self, wn_bounds, self.radiance_out[:,idx], idx=idx)
-					self.rad_T_out[idx], _, _, _ = max_btemp_blackbody(self, wn_bounds, self.radiance_out[:,idx], idx=idx)
-				else:  # two_wave mode
-					# Two-wave mode: separate thermal and visible solvers
-					rad_thermal, fl_up = self.rte_disort_out.disort_run(self.T_out[:,idx],self.mu_out[idx],F)
-					rad_vis, fl_up_vis = self.rte_disort_vis_out.disort_run(self.T_out[:,idx],self.mu_out[idx],F)
-					self.radiance_out[idx] = (rad_thermal+rad_vis).numpy()
-					self.radiance_out_therm[idx] = rad_thermal.numpy()
-					self.radiance_out_vis[idx] = rad_vis.numpy()
-					self.flux_out[idx] = fl_up.copy()
-					self.flux_out_vis[idx] = fl_up_vis.copy()
-					self.rad_T_out[idx] = (rad_thermal.numpy()*np.pi/self.cfg.sigma)**0.25
-			if self.cfg.output_radiance_mode in ['multi_wave', 'hybrid']:
-				#Run disort again with spectral features removed to produce a smooth radiance spectrum for emissivity division. 
-				self.disort_emissivity()
-		
-		# CRATER RADIANCE CALCULATION
-		if (self.cfg.use_RTE and self.cfg.crater and self.cfg.compute_crater_radiance and 
-			hasattr(self, 'observer_radiance_calc')):
-			print("Computing crater observer radiance.")
-			
-			# Initialize observer radiance output array if not done yet (multi-wave case)
-			if self.observer_radiance_out is None:
-				n_observers = len(self.cfg.observer_vectors)
-				n_out = len(self.t_out)
-				if self.cfg.use_RTE and self.cfg.RTE_solver == 'disort' and self.cfg.output_radiance_mode in ['multi_wave', 'hybrid']:
-					n_waves = len(self.rte_disort_out.wavenumbers)
-					self.observer_radiance_out = np.zeros((n_observers, n_waves, n_out))
-				else:
-					self.observer_radiance_out = np.zeros((n_observers, n_out))
-			
-			# Calculate observer radiance for each output time
-			for idx in range(len(self.t_out)):
-				print(f"Time {idx+1} of {len(self.t_out)}...")
-				if non_diurnal:
-					F = self.F_steady
-					mu_sun = self.mu_steady
-				else:
-					t_hist = np.array(self.t_history)
-					t = self.t_out[idx]
-					F_idx = np.argmin(np.abs(t_hist - t))
-					F = self.F_array[F_idx]
-					mu_sun = self.mu_array[F_idx]
-				
-				# Get crater temperature for this time step
-				if non_diurnal:
-					T_crater_time = self.T_crater_out.copy()  # [depth, n_facets]
-				else:
-					T_crater_time = self.T_crater_out[:, :, idx]  # [depth, n_facets]
-				
-				# Calculate scattered energy parameters for observer radiance calculation
-				sun_vec = None
-				crater_radtrans = None
-				therm_flux_facets = None
-				illuminated = None
-				
-				# Get sun vector if available
-				if not self.cfg.diurnal and hasattr(self, 'sun_x_steady') and hasattr(self, 'sun_y_steady') and hasattr(self, 'sun_z_steady'):
-					sun_vec = np.array([self.sun_x_steady, self.sun_y_steady, self.sun_z_steady])
-				elif self.cfg.diurnal and hasattr(self, 'sun_x') and hasattr(self, 'sun_y') and hasattr(self, 'sun_z'):
-					# For diurnal case, use F_idx from above
-					if 'F_idx' in locals() and F_idx < len(self.sun_x):
-						sun_vec = np.array([self.sun_x[F_idx], self.sun_y[F_idx], self.sun_z[F_idx]])
-				
-				# Use crater radiative transfer object if available
-				if hasattr(self, 'crater_radtrans'):
-					crater_radtrans = self.crater_radtrans
-					
-				# Use thermal flux if available, but check if we need spectral resolution
-				if hasattr(self, 'flux_therm_crater'):
-					therm_flux_facets = self.flux_therm_crater
-					
-					# Check if we need spectral thermal flux for observer radiance calculations
-					if (self.cfg.output_radiance_mode in ['multi_wave', 'hybrid'] and 
-						self.cfg.use_RTE and self.cfg.RTE_solver == 'disort' and
-						therm_flux_facets.ndim == 1):  # broadband flux from thermal solver, but now we need spectral resolution to make our outputs. 
-						
-						# Calculate spectral properties for observer radiance
-						print("Computing spectral properties for observer radiance calculations...")
-						
-						# Use dedicated flux solvers instead of radiance solvers for efficiency
-						# The compute_spectral_properties method will automatically select crater flux solvers
-						target_disort = None  # Let compute_spectral_properties choose appropriate flux solver
-						
-						# Compute spectral properties using all facets at once with crater flux solver
-						spectral_albedo, spectral_emissivity, therm_flux_spectral, n_waves_out = self.compute_spectral_properties(
-							T_crater_time, self.cfg.output_radiance_mode, target_disort=target_disort, n_facets=self.n_facets
-						)
-						
-						# Replace broadband flux with spectral flux
-						therm_flux_facets = therm_flux_spectral
-						
-						# Update crater albedo and emissivity with spectral values
-						self.crater_albedo = spectral_albedo
-						self.crater_emissivity = spectral_emissivity
-					
-				# Use illuminated facets if available  
-				if hasattr(self, 'illuminated'):
-					illuminated = self.illuminated
-				
-				# Calculate radiance for all observers
-				observer_radiances = self.observer_radiance_calc.compute_all_observers(
-					T_crater_time, self.crater_mesh, self.crater_shadowtester, mu_sun, F,
-					sun_vec, crater_radtrans, therm_flux_facets, illuminated, 
-					self.crater_albedo, self.crater_emissivity
-				)
-				
-				# Store results
-				if self.cfg.use_RTE and self.cfg.RTE_solver == 'disort' and self.cfg.output_radiance_mode in ['multi_wave', 'hybrid']:
-					# observer_radiances shape: [n_observers, n_waves, n_times]
-					self.observer_radiance_out[:, :, idx] = observer_radiances
-				else:
-					# observer_radiances shape: [n_observers, n_times]  
-					self.observer_radiance_out[:, idx] = observer_radiances
-		
-		print("Radiance calculation completed.")
+	# Note: _make_radiance_outputs() function removed - use radiance_processor module instead
 
 
-	def run(self, calculate_radiance=True):
+	def run(self):
 		"""Execute the full time-stepping simulation.
 		
-		Args:
-			calculate_radiance: Whether to calculate radiance outputs (default True for backwards compatibility)
+		Note: Radiance calculations are now handled by the separate radiance_processor module.
+		Use calculate_radiances_from_results() for post-processing radiance computation.
 		"""
 		start_time = time.time()
 		
@@ -1226,9 +977,7 @@ class Simulator:
 		# Always interpolate thermal results to desired output times
 		self._make_thermal_outputs()
 		
-		# Optionally calculate radiance outputs
-		if calculate_radiance:
-			self._make_radiance_outputs()
+		# Note: Radiance outputs are now calculated separately using radiance_processor module
 
 		elapsed = time.time() - start_time
 		print(f"Simulation completed in {elapsed:.2f} s")
@@ -1244,6 +993,107 @@ class Simulator:
 				print(f"  - Final message: {diagnostics['convergence_message']}")
 
 		return self.T_out, self.phi_vis_out, self.phi_therm_out, self.T_surf_out, self.t_out
+	
+	# ========================================
+	# BACKWARD COMPATIBILITY PROPERTIES
+	# ========================================
+	# These properties provide backward compatibility by automatically computing radiances
+	# when accessed, using the new radiance_processor module
+	
+	@property
+	def radiance_out(self):
+		"""Backward compatibility: compute radiance using radiance_processor when accessed."""
+		if not hasattr(self, '_cached_radiance_out') or self._cached_radiance_out is None:
+			warnings.warn(
+				"Accessing radiance_out: Radiance computation now handled by radiance_processor. "
+				"Consider using calculate_radiances_from_results() directly for better control.",
+				DeprecationWarning, stacklevel=2
+			)
+			self._compute_backward_compatible_radiances()
+		return self._cached_radiance_out
+	
+	@radiance_out.setter  
+	def radiance_out(self, value):
+		"""Allow setting radiance_out for backward compatibility."""
+		self._cached_radiance_out = value
+		
+	@property
+	def flux_out(self):
+		"""Backward compatibility: compute flux using radiance_processor when accessed."""
+		if not hasattr(self, '_cached_flux_out') or self._cached_flux_out is None:
+			warnings.warn(
+				"Accessing flux_out: Radiance computation now handled by radiance_processor. "
+				"Consider using calculate_radiances_from_results() directly for better control.",
+				DeprecationWarning, stacklevel=2
+			)
+			self._compute_backward_compatible_radiances()
+		return self._cached_flux_out
+	
+	@flux_out.setter
+	def flux_out(self, value):
+		"""Allow setting flux_out for backward compatibility."""
+		self._cached_flux_out = value
+		
+	@property
+	def wavenumbers_out(self):
+		"""Backward compatibility: get wavenumbers from radiance_processor when accessed."""
+		if not hasattr(self, '_cached_wavenumbers_out') or self._cached_wavenumbers_out is None:
+			self._compute_backward_compatible_radiances()
+		return self._cached_wavenumbers_out
+	
+	@wavenumbers_out.setter
+	def wavenumbers_out(self, value):
+		"""Allow setting wavenumbers_out for backward compatibility."""
+		self._cached_wavenumbers_out = value
+		
+	def _compute_backward_compatible_radiances(self):
+		"""Compute radiances using radiance_processor for backward compatibility."""
+		try:
+			from radiance_processor import calculate_radiances_from_results
+			
+			# Get thermal results
+			thermal_results = (self.T_out, self.T_surf_out, self.t_out)
+			
+			# Get solar conditions if available
+			solar_conditions = None
+			if hasattr(self, 'mu_array') and hasattr(self, 'F_array'):
+				solar_conditions = (self.mu_array, self.F_array)
+			
+			# Compute radiances using default observer angle
+			radiance_results = calculate_radiances_from_results(
+				thermal_results, self.cfg, 
+				observer_mu=[getattr(self.cfg, 'observer_mu', 1.0)],
+				grid=self.grid, solar_conditions=solar_conditions
+			)
+			
+			# Store results in backward-compatible format
+			if 'radiance' in radiance_results:
+				# Multi-wave mode
+				self._cached_radiance_out = radiance_results['radiance'][0, :, :]  # First observer
+				self._cached_flux_out = radiance_results['flux'][0, :, :]
+				self._cached_wavenumbers_out = radiance_results['wavenumbers']
+			elif 'radiance_thermal' in radiance_results:
+				# Hybrid or two-wave mode
+				if radiance_results['radiance_thermal'].ndim > 2:
+					# Hybrid mode: use thermal component
+					self._cached_radiance_out = radiance_results['radiance_thermal'][0, :, :]
+					self._cached_flux_out = radiance_results['flux_thermal'][0, :, :]
+					self._cached_wavenumbers_out = radiance_results.get('wavenumbers')
+				else:
+					# Two-wave mode: scalar values
+					self._cached_radiance_out = radiance_results['radiance_thermal'][0, :]
+					self._cached_flux_out = radiance_results['flux_thermal'][0, :]
+					self._cached_wavenumbers_out = None
+		except ImportError:
+			warnings.warn("radiance_processor module not available. Cannot compute backward compatible radiances.")
+			self._cached_radiance_out = np.zeros((1, len(self.t_out))) 
+			self._cached_flux_out = np.zeros((1, len(self.t_out)))
+			self._cached_wavenumbers_out = None
+		except Exception as e:
+			warnings.warn(f"Error computing backward compatible radiances: {str(e)}")
+			self._cached_radiance_out = np.zeros((1, len(self.t_out)))
+			self._cached_flux_out = np.zeros((1, len(self.t_out)))
+			self._cached_wavenumbers_out = None
 	
 	def compute_spectral_properties(self, T_profile, solver_mode, target_disort=None, n_facets=None):
 		"""
@@ -1946,7 +1796,7 @@ def plot_observer_emissivity_spectra_interactive(observer_radiance_out, observer
 
 if __name__ == "__main__":
 	sim = Simulator()
-	T_out, phi_vis, phi_therm, T_surf_out, t_out = sim.run(calculate_radiance=sim.cfg.compute_observer_radiance)
+	T_out, phi_vis, phi_therm, T_surf_out, t_out = sim.run()
 	import matplotlib.pyplot as plt
 
 	# Plot temperature at the surface (first grid point) over time
