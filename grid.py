@@ -276,14 +276,14 @@ class LayerGrid:
 
                     # Update stored conductivity arrays
                     self.cond = k_temp_dependent.copy()
-                    self.K = self.cond / (self.dens * self.heat) 
 
                     #Update q arrays if we're runing an RTE model (otherwise, q is not used)
                     if cfg.use_RTE:
                         cfg.q = 1 / (self.cond * cfg.Et)                
                         cfg.q_bound = np.interp(self.x_boundaries,self.x,cfg.q) 
                 
-                # Update the finite difference matrix with new properties
+                # Update diffusivity and the finite difference matrix with new properties
+                self.K = self.cond / (self.dens * self.heat)
                 self._update_fd_matrix(heat=cp_temp_dependent, cond=k_temp_dependent)
                 
                 # Store current temperatures as the last update time
@@ -495,10 +495,9 @@ class LayerGrid:
                 
                 # Update stored conductivity arrays
                 self.cond = k_temp_dependent_fd.copy()
-                self.K = k_temp_dependent_fd / (dens * heat)
 
                 #Update q arrays, shouldn't need to do this for RTE cases where q is actually used. 
-                if self.cfg.use_RTE:
+                if cfg.use_RTE:
                     cfg.q = 1/ (self.cond * cfg.Et)                
                     cfg.q_bound = np.interp(self.x_boundaries,self.x,cfg.q)
                 
@@ -508,8 +507,9 @@ class LayerGrid:
                 # Pass the diffusion units version to matrix update
                 k_temp_dependent = k_temp_dependent_fd
             
-            # Update matrix with new properties if any were calculated
+            # Update diffusivity and matrix with new properties if any were calculated
             if heat_temp_dependent is not None or k_temp_dependent is not None:
+                self.K = self.cond / (self.dens * self.heat)
                 self._update_fd_matrix(heat=heat_temp_dependent, cond=k_temp_dependent)
                 
             # Store the temperature field from when properties were last updated
