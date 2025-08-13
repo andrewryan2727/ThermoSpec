@@ -422,12 +422,16 @@ class Simulator:
 			Q = self.F * self.cfg.J * self.mu * (1 - self.cfg.albedo)
 		se = self.cfg.sigma * self.cfg.em
 		#distance from first node to the surface, which occurs halfway between this node and virtual node. Converting x units from tau to m here. 
-		dx = ((self.grid.x[1] - self.grid.x[0])/2.)/self.cfg.Et 
-		k_dx = self.cfg.k_dust/dx
+		if hasattr(self.cfg.Et,'shape'):
+			dx = ((self.grid.x[1] - self.grid.x[0])/2.)/self.cfg.Et[1]
+			k_dx = self.grid.cond[1]/self.cfg.Et[1]**2/dx
+		else:
+			dx = ((self.grid.x[1] - self.grid.x[0])/2.)/self.cfg.Et
+			k_dx = self.grid.cond[1]/self.cfg.Et**2/dx
 		for it in range(self.cfg.T_surf_max_iter):
 			#Calculate surface temperature T_surf with Newton's method.
-			W =  (Q + k_dx*(T1 - T_surf) - se*T_surf**4.)
-			dWdT = (-k_dx - 4.*se*T_surf**3.)
+			W =  (Q + k_dx*(T1 - T_surf) - se*T_surf**4)
+			dWdT = (-k_dx - 4.*se*T_surf**3)
 			dT = W/dWdT
 			if np.all(np.abs(dT) < self.cfg.T_surf_tol):
 				break
@@ -768,7 +772,7 @@ class Simulator:
 				if self.cfg.use_RTE:
 					if(self.cfg.RTE_solver == 'hapke'):
 						source_term,self.phi_vis_prev,self.phi_therm_prev = self.rte_hapke.compute_source(self.T,self.grid.x_RTE,self.grid.x_boundaries,self.phi_vis_prev,self.phi_therm_prev, self.mu, self.F)
-						source_term_vis = np.zeros_like(source_term) #Hapke model source term already includes vis. 
+						source_term_vis = np.zeros_like(source_term) #Hapke model source term already includes vis.
 					elif(self.cfg.RTE_solver == 'disort'):
 						source_term,self.flux_up_therm = self.rte_disort.disort_run(self.T,self.mu,self.F)
 						if self.cfg.thermal_evolution_mode in ['two_wave', 'hybrid'] and self.F > 0.001:
@@ -781,6 +785,10 @@ class Simulator:
 					else:
 						print("Error: Invalid RTE solver choice! Options are hapke or disort, or set use_RTE to False")
 						return self.T_out, self.phi_vis_out, self.phi_therm_out, self.T_surf_out, self.t_out
+				# Check for temperature-dependent property updates before solving heat equation
+				if self.grid.temp_dependent_enabled:
+					self.grid.check_and_update_temperature_dependent_properties(self.T)
+				
 				# Advance heat equation implicitly
 				self.T = self._fd1d_heat_implicit_diag(self.T,source_term+source_term_vis)
 				#Apply boundary conditions. 

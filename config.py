@@ -76,6 +76,22 @@ class SimulationConfig:
     rho_rock: float = 2000.0         # rock density (kg/m^3)
     cp_rock: float = 700.0           # rock heat capacity (J/kg/K)
 
+    # Depth-dependent material properties (single_layer=True only)
+    depth_dependent_properties: bool = False  # Master enable flag for depth-dependent material properties
+    rho_surface: float = 1100.0                # Surface bulk density (kg/m³)
+    rho_deep: float = 1800.0                  # Deep bulk density (kg/m³)
+    rho_particle: float = 3000.0              # Particle material density (grain density, kg/m³) - used to calculate fill fraction
+    k_surface: float = 7.4e-4                   # Surface thermal conductivity (W/m/K)
+    k_deep: float = 3.4e-3                    # Deep thermal conductivity (W/m/K)
+    density_scale_height: float = 0.06        # Density scale height H in meters
+    
+    # Temperature-dependent material properties
+    temperature_dependent_properties: bool = False  # Master enable flag for temperature-dependent properties
+    temp_dependent_cp: bool = False                  # Enable temperature-dependent heat capacity
+    temp_dependent_k: bool = False                   # Enable temperature-dependent thermal conductivity
+    cp_coeffs: list = field(default_factory=lambda: [-3.6125, 2.7431, 2.3616e-3, -1.2340e-5, 8.9093e-9])  # Polynomial coefficients [c0,c1,c2,c3,c4] for cp(T)
+    k_temp_coeff: float = 2.7/(350.0**3.)                        # Temperature coefficient B for radiative conductivity: k_total = k_dust(z) * (1 + B*T³)
+    temp_change_threshold: float = 3.0               # Temperature change threshold (K) for matrix updates
 
     # Boundary conditions and initialization
     T_bottom: float = 300.           # bottom boundary temperature (when Dirichlet) and global initialization temperature (K)
@@ -115,6 +131,7 @@ class SimulationConfig:
     use_spec: bool = False     #Use emissivity spectrum for substrate. If false, uses global reflectivity value R_base
     fill_frac: float = 0.63   #Fill fraction for particles. 
     radius: float = 15.e-6    #Particle radius in meters. 
+    scale_Et: bool = False     #Scale the wavelenth-dependent Et values so that the mean is equal to cfg.Et. 
     
     #Output settings. Choose files with desired multiwave spectral sampling for calculating radiance output. 
     mie_file_out: str = "/Users/ryan/Research/RT_models/RT_thermal_model/Optical_props/quartz_spitzer_combined_15um_mie.txt"    
@@ -129,9 +146,6 @@ class SimulationConfig:
     #DISORT optical properties for visible portion of the spectrum
     force_vis_disort: bool = False  # Force visible optical properties to be used for visible portion of the spectrum. If False, uses optical propereties loaded from files above. 
 
-    #DISORT depth-dependent options. 
-    # NOT YET IMPLEMENTED. 
-    depth_dependent: bool = False #Depth-dependent optical properties from file (extinction coefficient, ssalb, scattering matrix moments)
 
 
     # Physical constants
@@ -174,6 +188,30 @@ class SimulationConfig:
         if self.output_radiance_mode not in valid_modes:
             raise ValueError(f"output_radiance_mode must be one of {valid_modes}")
             
+        # Validation for depth-dependent properties
+        if self.depth_dependent_properties and not self.single_layer:
+            raise ValueError("Depth-dependent properties are only supported for single-layer models (single_layer=True)")
+        if self.depth_dependent_properties:
+            if self.rho_surface <= 0 or self.rho_deep <= 0:
+                raise ValueError("Surface and deep bulk densities must be positive")
+            if self.rho_particle <= 0:
+                raise ValueError("Particle density must be positive")
+            if self.rho_surface >= self.rho_particle or self.rho_deep >= self.rho_particle:
+                raise ValueError("Bulk densities must be less than particle density")
+            if self.k_surface <= 0 or self.k_deep <= 0:
+                raise ValueError("Surface and deep conductivities must be positive")
+            if self.density_scale_height <= 0:
+                raise ValueError("Density scale height must be positive")
+                
+        # Validation for temperature-dependent properties  
+        if self.temperature_dependent_properties:
+            if len(self.cp_coeffs) != 5:
+                raise ValueError("cp_coeffs must contain exactly 5 polynomial coefficients [c0,c1,c2,c3,c4]")
+            if self.temp_change_threshold <= 0:
+                raise ValueError("Temperature change threshold must be positive")
+            if self.temp_dependent_k and self.k_temp_coeff < 0:
+                raise ValueError("Temperature conductivity coefficient k_temp_coeff must be non-negative")
+            
         # Derived radiative parameter
         self.gamma_vis = np.sqrt(1.0 - self.ssalb_vis)
         self.gamma_therm = np.sqrt(1.0 - self.ssalb_therm)
@@ -181,6 +219,7 @@ class SimulationConfig:
         self.J = self.S / (self.R ** 2.0)
         # Radiative ratio q
         self.q = 1.0 / (self.k_dust * self.Et)
+        self.q_bound = self.q
         if(self.k_dust_auto and not self.use_RTE):
             #Add the estimation for the radiative term from Hapke's book, equation 16.31. 
             self.k_dust += (4.0/self.Et)*self.sigma*self.T_bottom**3.

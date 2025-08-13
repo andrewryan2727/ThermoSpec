@@ -72,12 +72,12 @@ class RadiativeTransfer:
         # Using Hapke RTE model. 
         self.mu = mu
         self.F = F
-        #Interpolate temperature from layer centers to boundaries. 
+        #Interpolate temperature from layer centers (x_RTE) to boundaries (x). 
         T = np.interp(x,x_RTE,T_layers[1:self.grid.nlay_dust+1])
         if F > 0 or Q_vis > 1.0e-3:
             phi_vis_new = self.solve_visible(x,phi_vis_prev,T, mu, F, Q_vis)
             F2 = F*(mu>0.001)
-            source_vis = self.cfg.eta * self.cfg.gamma_vis**2 * self.cfg.q * (
+            source_vis = self.cfg.eta * self.cfg.gamma_vis**2 * self.cfg.q_bound * (
                 self.cfg.J * F2 * np.exp(-x / mu) + 4*np.pi*phi_vis_new)
         else:
             source_vis = np.zeros(len(x))
@@ -88,7 +88,7 @@ class RadiativeTransfer:
             d2 = self._therm_fun(x, phi_therm_new, T)
         else:
             d2 = self._therm_fun(x, phi_therm_new, T[:self.grid.nlay_dust+1])
-        source_therm = np.pi * self.cfg.q * d2
+        source_therm = np.pi * self.cfg.q_bound * d2
 
         if not self.cfg.single_layer:
             #Calculate boundary fluxes. 

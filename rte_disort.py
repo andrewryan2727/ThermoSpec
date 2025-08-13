@@ -32,8 +32,8 @@ class DisortRTESolver:
                 self._filter_thermal_wavelengths()
                 
         #Construct optical properties tensors
-        if(self.is_multi_wave or self.cfg.depth_dependent):
-            #More complicated set up for multiple wavelengths and/or depth-dependent properties
+        if(self.is_multi_wave):
+            #More complicated set up for multiple wavelengths
             self.prop = self._setup_optical_properties_advanced() 
         else:
             #Simple set up for globally uniform properties. 
@@ -179,7 +179,7 @@ class DisortRTESolver:
         n_layers = len(self.grid.x_RTE)
         prop = torch.zeros((1, self.n_cols, n_layers, 2 + self.cfg.nmom), dtype=torch.float64)
 
-        tau_boundaries = self.grid.x_boundaries #tau at boundaries of each layer, convert from global Et to wavelength-specific Et.  
+        tau_boundaries = self.grid.x_boundaries
         if not self.planck: tau_boundaries *= self.cfg.eta #Convert tau vaues using visible extinction coefficient ratio. 
         dtau = tau_boundaries[1:] - tau_boundaries[:-1] #tau at boundaries of each layer
         tau_layer = torch.tensor(dtau)
@@ -212,81 +212,60 @@ class DisortRTESolver:
 
         #initialize properties tensor. Last dimension is tau + ss_albedo + scattering moments
         prop = torch.zeros((n_waves, n_cols, n_layers, 2 + n_mom), dtype=torch.float64)
-        for i_wave in range(n_waves):
-            # Select dtau for this wavelength
-            #if self.cfg.multi_wave:
-            #    tau_layer = torch.tensor(self.grid.dtau[i_wave])
-            #else:
-            #    tau_layer = torch.tensor(self.grid.dtau)
+        Vp = (4./3.)*np.pi*self.cfg.radius**3. #particle volume, m^3
+        if self.cfg.depth_dependent_properties:
+            #Get particle fill fraction from depth-dependent density
+            fill_frac_layers = self.grid.rho_depth / self.cfg.rho_particle
+            # Calculate number density at each layer: n_p(z) = φ(z) / V_p
+            n_p = fill_frac_layers / Vp  # particles per m³ at each layer
+        else:
+            n_p= self.cfg.fill_frac / Vp #Use user-prescribed fill fraction
+        Et_mean = np.mean(n_p * self.Cext_array*1e-12)
+        if self.cfg.scale_Et:
+            #Calculate a scale factor to apply to the calculated Et values so that the mean is equivalent to the 
+            Et_scale = self.cfg.Et/Et_mean
+            print("Multi_wave mean Et rescaled to user input value!")
+        else:
+            Et_scale = 1.0
+        print(f"Multi_wave mean Et = {Et_scale*Et_mean}")
 
-            if self.cfg.depth_dependent:
-                #Depth-dependent properties
-                raise NotImplementedError("Depth-dependent properties not implemented yet.")
-                #Need to rewrite and finish this section! Incomplete! 
-                # if self.cfg.multi_wave:
-                #     ssa_layer = self.ssalb_array[i_wave, :]  # Shape: (n_layers,)
-                #     g_layer = self.cfg.g_profile[i_wave, :]      # Shape: (n_layers,)
-                #     moments = torch.stack([
-                #         torch.tensor(self.cfg.moments_profile[i_wave, :, i_mom])
-                #         for i_mom in range(n_mom)
-                #     ], dim=-1)  # (n_layers, n_mom)
-                # else:
-                #     ssa_layer = self.ssalb_array[:]          # Shape: (n_layers,)
-                #     g_layer = self.cfg.g_profile[:]              # Shape: (n_layers,)
-                #     moments = torch.stack([
-                #         torch.tensor(self.cfg.moments_profile[:, i_mom])
-                #         for i_mom in range(n_mom)
-                #     ], dim=-1)  # (n_layers, n_mom)
-            else:
-                # Uniform properties with depth
-                if self.is_multi_wave:
-                    #Calculate dtau at this wavelength using the extinction cross section Cext
-                    node_depth_meters = (self.grid.x_RTE/self.cfg.Et) #depth at center of each layer. 
-                    Vp = (4./3.)*np.pi*self.cfg.radius**3. #particle volume, m^3
-                    n_p= self.cfg.fill_frac / Vp #number of particles /m3
-                    Et = n_p * self.Cext_array[i_wave]*1e-12 #extinction coefficient at this wavelength, converting Cext from µm^2 to m^2 in the process. 
-                    if(self.uniform_props):
-                        Et = n_p * np.mean(self.Cext_array[self.wn_min:self.wn_max])*1e-12
-                    #Et = Et*10.0 + 0.0 #manual override to fixed value for testing 
-                    tau_boundaries = Et*self.grid.x_boundaries/self.cfg.Et #tau at boundaries of each layer, convert from global Et to wavelength-specific Et.  
-                    dtau = tau_boundaries[1:] - tau_boundaries[:-1] #tau thickness of each layer
-                    tau_layer = torch.tensor(dtau,dtype=torch.float64)
-                    ssalb_val = self.ssalb_array[i_wave].copy()
-                    if(self.cfg.force_vis_disort and self.wavenumbers[i_wave] >3330.0):
-                        #Force all visible wavelengths to use the DISORT default value for visible scattering albedo
-                        ssalb_val = self.cfg.ssalb_vis
-                    if(self.uniform_props):
-                        ssalb_val = np.mean(self.ssalb_array[self.wn_min:self.wn_max])
-                    # if self.wavenumbers[i_wave] >3330.0: 
-                    #     ssalb_val = ssalb_val*0.0 + 0.5 #manual override to fixed value for testing VISIBLE. 
-                    # else:
-                    #     ssalb_val = ssalb_val*0.0 + 0.8 #manual override for fixed value testing THERMAL
-                    ssa_layer = torch.full([n_layers], ssalb_val,dtype=torch.float64)
-                    g_val = self.g_array[i_wave]
-                    if(self.cfg.force_vis_disort and self.wavenumbers[i_wave] >3330.0):
-                        #Force all visible wavelengths to use the DISORT default value for visible scattering asymmetry factor
-                        g_val = self.cfg.g_vis
-                    #g_val = g_val*0.0 #manual override to fixed value for testing. 
-                    if(self.uniform_props):
-                        g_val = np.mean(self.g_array[self.wn_min:self.wn_max])
-                    moms = scattering_moments(self.cfg.nmom, "henyey-greenstein", g_val)
-                    moments = torch.stack(
-                        [torch.full((n_layers,), moms[i]) for i in range(n_mom)],
-                        dim=-1
-                    )
-                else:
-                    ssa_layer = np.full(n_layers, self.cfg.ssalb_vis)
-                    g_layer = np.full(n_layers, self.cfg.g)
-                    moms = scattering_moments(self.cfg.nmom, "henyey-greenstein", g_layer[0])
-                    moments = torch.stack(
-                        [torch.full((n_layers,), moms[i],dtype=torch.float64) for i in range(n_mom)],
-                        dim=-1
-                    )
+        for i_wave in range(n_waves):
+            #Calculate dtau at this wavelength using the extinction cross section Cext
+
+            Et = Et_scale*n_p * self.Cext_array[i_wave]*1e-12 #extinction coefficient at this wavelength, converting Cext from µm^2 to m^2 in the process. 
+            if(self.uniform_props):
+                Et = Et_scale*n_p * np.mean(self.Cext_array[self.wn_min:self.wn_max])*1e-12
+            #Et = Et*10.0 + 0.0 #manual override to fixed value for testing 
+            tau_boundaries = Et*self.grid.x_boundaries/self.cfg.Et #tau at boundaries of each layer, convert from global Et to wavelength-specific Et.  
+            dtau = tau_boundaries[1:] - tau_boundaries[:-1] #tau thickness of each layer
+            tau_layer = torch.tensor(dtau,dtype=torch.float64)
+            ssalb_val = self.ssalb_array[i_wave].copy()
+            if(self.cfg.force_vis_disort and self.wavenumbers[i_wave] >3330.0):
+                #Force all visible wavelengths to use the DISORT default value for visible scattering albedo
+                ssalb_val = self.cfg.ssalb_vis
+            if(self.uniform_props):
+                ssalb_val = np.mean(self.ssalb_array[self.wn_min:self.wn_max])
+            # if self.wavenumbers[i_wave] >3330.0: 
+            #     ssalb_val = ssalb_val*0.0 + 0.5 #manual override to fixed value for testing VISIBLE. 
+            # else:
+            #     ssalb_val = ssalb_val*0.0 + 0.8 #manual override for fixed value testing THERMAL
+            ssa_layer = torch.full([n_layers], ssalb_val,dtype=torch.float64)
+            g_val = self.g_array[i_wave]
+            if(self.cfg.force_vis_disort and self.wavenumbers[i_wave] >3330.0):
+                #Force all visible wavelengths to use the DISORT default value for visible scattering asymmetry factor
+                g_val = self.cfg.g_vis
+            #g_val = g_val*0.0 #manual override to fixed value for testing. 
+            if(self.uniform_props):
+                g_val = np.mean(self.g_array[self.wn_min:self.wn_max])
+            moms = scattering_moments(self.cfg.nmom, "henyey-greenstein", g_val)
+            moments = torch.stack(
+                [torch.full((n_layers,), moms[i]) for i in range(n_mom)],
+                dim=-1
+            )
             #Populate properties tensor
             prop[i_wave, :, :, 0] = tau_layer
             prop[i_wave, :, :, 1] = ssa_layer
             prop[i_wave, :, :, 2:] = moments
-
         return prop
 
     def _setup_disort_options(self):
@@ -509,28 +488,33 @@ class DisortRTESolver:
         # 7.	TRNMED(iu) - Transmissivity of the medium as a function of incident beam angle cosine UMU(IU)  (IBCND = 1 case only)
 
         # Up stream minus down stream rough calculation of flux divergence. Not as accurate as what disort provides. 
-        #F_net = result[0,0,:,0] - result[0,0,:,1] 
+        F_net = result[:,:,:,0] - result[:,:,:,1] #[nwave, ncol, ndepth,up/down]
         # Calculate heating rate as flux divergence
-        #Q_rad = np.diff(F_net.numpy()) / self.grid.dtau
+        Q_rad_simple = np.diff(F_net.numpy()) / self.grid.dtau
+        if self.is_multi_wave:
+            #Sum over the different wavelengths. 
+            Q_rad_simple = np.sum(Q_rad_simple,axis=0)
+        Q_rad_simple = np.squeeze(Q_rad_simple)
         if(self.output_radiance):
             #Just return the radiance as viewed by the observer, currently fixed at zenith. 
             rad = self.ds.gather_rad() #rad[nwave,ncol,ndepth,n_obs_direction mu, n_obs_direction phi]
             return(rad[:,:,0,:,:],fl_up)
         else:
-            #Get flux divergence. 
+            # #Get flux divergence. This method didn't work well for very slow rotators (e.g., the Moon). Let to fluxes very deep that shouldn't exist. 
             flx = self.ds.gather_flx() #flx[nwave,ncol,ndepth,8 properties] See table above for list of properties. 
-            if self.is_multi_wave:
-                #Summation of values from different wavelength bins
-                flux_divergence = flx[:,:,:,3]
-                Q_rad = torch.sum(flux_divergence,dim=0)
-            else:
-                Q_rad = flx[0,:,:,3] #returns Qrad[ncol,ndepth_boundaries]
+            # if self.is_multi_wave:
+            #     #Summation of values from different wavelength bins
+            #     flux_divergence = flx[:,:,:,3]
+            #     Q_rad = torch.sum(flux_divergence,dim=0)
+            # else:
+            #     Q_rad = flx[0,:,:,3] #returns flux divergence Qrad[ncol,ndepth_boundaries]
             if(self.n_cols==1):
-                Q_rad_interp = np.interp(self.grid.x_RTE,self.grid.x_boundaries,Q_rad[0,:])
+                #Q_rad_interp = np.interp(self.grid.x_RTE,self.grid.x_boundaries,Q_rad[0,:])
                 source = np.zeros(self.grid.x_num)
-                source[1:self.grid.nlay_dust+1] = Q_rad_interp
+                source[1:self.grid.nlay_dust+1] = Q_rad_simple #used to be Q_rad_interp here. 
                 source_term = source * self.grid.K * self.cfg.q
                 if(not self.cfg.single_layer):
+                    #Two-layer mode. Need to add terms for the boundary. 
                     #emission = np.pi*np.sum(planck_wn_integrated(self.wn_bins,T_interface)*self.emiss_base)
                     #Radiative flux source term at the rock/dust boundary. They are not multipled by Kq because they are not volumetric. 
                     #Terms on right are down direct-beam flux + down diffuse flux - up diffuse flux. 
@@ -538,12 +522,12 @@ class DisortRTESolver:
             else:
                 #Multiple columns. Return source_term in format [n_colns, n_depth]
                 #Q_rad_interp = interpn((self.grid.x_boundaries,),Q_rad.numpy().swapaxes(0,1),self.grid.x_RTE,bounds_error=False,fill_value=None)
-                Q_rad_interp = np.vstack([
-                    np.interp(self.grid.x_RTE, self.grid.x_boundaries, Q_rad[col,:])
-                    for col in range(self.n_cols)
-                ])
+                # Q_rad_interp = np.vstack([
+                #     np.interp(self.grid.x_RTE, self.grid.x_boundaries, Q_rad[col,:])
+                #     for col in range(self.n_cols)
+                # ])
                 source = np.zeros((self.n_cols,self.grid.x_num))
-                source[:,1:self.grid.nlay_dust+1] = Q_rad_interp
+                source[:,1:self.grid.nlay_dust+1] = Q_rad_simple #used to be Q_rad_interp here. 
                 source_term = source * self.grid.K * self.cfg.q
                 if(not self.cfg.single_layer):
                     #emission = np.pi*np.sum(planck_wn_integrated(self.wn_bins,T_interface)*self.emiss_base)
