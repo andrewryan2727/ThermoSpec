@@ -323,7 +323,9 @@ def create_default_base_config(output_path: str, planetary_body: str = "generic"
             'illum_freq': config_dict['illum_freq'],
             'compute_crater_radiance': config_dict['compute_crater_radiance'],
             # Better formatting for observer vectors - convert to more readable format
-            'observer_vectors': _format_observer_vectors(config_dict['observer_vectors'])
+            'observer_vectors': _format_observer_vectors(config_dict['observer_vectors']),
+            'crater_mesh': config_dict.get('crater_mesh', '/Users/ryan/Research/RT_models/RT_thermal_model/Roughness_files/new_crater2.txt'),
+            'crater_selfheating': config_dict.get('crater_selfheating', '/Users/ryan/Research/RT_models/RT_thermal_model/Roughness_files/new_crater2_selfheating_list.txt')
         },
         
         'material_properties_dust': {
@@ -340,6 +342,25 @@ def create_default_base_config(output_path: str, planetary_body: str = "generic"
             'k_rock': config_dict['k_rock'],
             'rho_rock': config_dict['rho_rock'],
             'cp_rock': config_dict['cp_rock']
+        },
+        
+        'depth_dependent_properties': {
+            'depth_dependent_properties': config_dict['depth_dependent_properties'],
+            'rho_surface': config_dict['rho_surface'],
+            'rho_deep': config_dict['rho_deep'],
+            'rho_particle': config_dict['rho_particle'],
+            'k_surface': config_dict['k_surface'],
+            'k_deep': config_dict['k_deep'],
+            'density_scale_height': config_dict['density_scale_height']
+        },
+        
+        'temperature_dependent_properties': {
+            'temperature_dependent_properties': config_dict['temperature_dependent_properties'],
+            'temp_dependent_cp': config_dict['temp_dependent_cp'],
+            'temp_dependent_k': config_dict['temp_dependent_k'],
+            'cp_coeffs': config_dict['cp_coeffs'],
+            'k_temp_coeff': config_dict['k_temp_coeff'],
+            'temp_change_threshold': config_dict['temp_change_threshold']
         },
         
         'boundary_conditions': {
@@ -375,7 +396,8 @@ def create_default_base_config(output_path: str, planetary_body: str = "generic"
             'substrate_spectrum': config_dict['substrate_spectrum'],
             'use_spec': config_dict['use_spec'],
             'fill_frac': config_dict['fill_frac'],
-            'radius': config_dict['radius']
+            'radius': config_dict['radius'],
+            'scale_Et': config_dict['scale_Et']
         },
         
         'disort_output_settings': {
@@ -393,9 +415,6 @@ def create_default_base_config(output_path: str, planetary_body: str = "generic"
             'force_vis_disort': config_dict['force_vis_disort']
         },
         
-        'disort_depth_dependent': {
-            'depth_dependent': config_dict['depth_dependent']
-        },
         
         'physical_constants': {
             'sigma': config_dict['sigma']

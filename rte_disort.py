@@ -215,19 +215,22 @@ class DisortRTESolver:
         Vp = (4./3.)*np.pi*self.cfg.radius**3. #particle volume, m^3
         if self.cfg.depth_dependent_properties:
             #Get particle fill fraction from depth-dependent density
-            fill_frac_layers = self.grid.rho_depth / self.cfg.rho_particle
+            fill_frac_layers = self.grid.rho_depth[1:self.grid.nlay_dust+1] / self.cfg.rho_particle
             # Calculate number density at each layer: n_p(z) = φ(z) / V_p
             n_p = fill_frac_layers / Vp  # particles per m³ at each layer
         else:
             n_p= self.cfg.fill_frac / Vp #Use user-prescribed fill fraction
-        Et_mean = np.mean(n_p * self.Cext_array*1e-12)
+        Et_mean = np.mean(np.mean(n_p) * self.Cext_array*1e-12)
         if self.cfg.scale_Et:
             #Calculate a scale factor to apply to the calculated Et values so that the mean is equivalent to the 
-            Et_scale = self.cfg.Et/Et_mean
+            if self.cfg.depth_dependent_properties:
+                Et_scale = self.cfg.Et[1:self.grid.nlay_dust+1]/Et_mean
+            else:
+                Et_scale = self.cfg.Et/Et_mean
             print("Multi_wave mean Et rescaled to user input value!")
         else:
             Et_scale = 1.0
-        print(f"Multi_wave mean Et = {Et_scale*Et_mean}")
+        #print(f"Multi_wave mean Et = {Et_scale*Et_mean}")
 
         for i_wave in range(n_waves):
             #Calculate dtau at this wavelength using the extinction cross section Cext
@@ -235,8 +238,13 @@ class DisortRTESolver:
             Et = Et_scale*n_p * self.Cext_array[i_wave]*1e-12 #extinction coefficient at this wavelength, converting Cext from µm^2 to m^2 in the process. 
             if(self.uniform_props):
                 Et = Et_scale*n_p * np.mean(self.Cext_array[self.wn_min:self.wn_max])*1e-12
-            #Et = Et*10.0 + 0.0 #manual override to fixed value for testing 
-            tau_boundaries = Et*self.grid.x_boundaries/self.cfg.Et #tau at boundaries of each layer, convert from global Et to wavelength-specific Et.  
+            #Et = Et*10.0 + 0.0 #manual override to fixed value for testing
+            # Not working for depth-dependent properties yet. cfg.ET and the new Et are for layer centers, but x_boundaries are at edges... 
+            if self.cfg.depth_dependent_properties:
+                x_boundaries_m = self.grid.x_boundaries[1:]/self.cfg.Et[1:self.grid.nlay_dust+1] #n=0 always 0, and the n+1 value is based on Et fo that layer, so this works. 
+                tau_boundaries = np.insert(Et*x_boundaries_m,0,0) #Convert to new Et. Add back 0 at the beginning. 
+            else:
+                tau_boundaries = Et*self.grid.x_boundaries/self.cfg.Et #tau at boundaries of each layer, convert from global Et to wavelength-specific Et.  
             dtau = tau_boundaries[1:] - tau_boundaries[:-1] #tau thickness of each layer
             tau_layer = torch.tensor(dtau,dtype=torch.float64)
             ssalb_val = self.ssalb_array[i_wave].copy()

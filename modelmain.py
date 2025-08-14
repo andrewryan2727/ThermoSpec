@@ -1366,7 +1366,7 @@ def fit_blackbody_wn_banded(sim,wn_edges_input, radiance_input,idx=-1):
 	return T_fit, B_fit, radiance_input/B_fit, wn_edges
 
 
-def max_btemp_blackbody(sim, wn_edges_input, radiance_input, idx=-1):
+def max_btemp_blackbody(sim, wn_edges_input, radiance_input, idx=-1,wn_min=900, wn_max = 1700):
 	"""
 	Calculate brightness temperature for each wavenumber band, find the maximum,
 	and generate a Planck blackbody spectrum using that maximum temperature.
@@ -1383,9 +1383,7 @@ def max_btemp_blackbody(sim, wn_edges_input, radiance_input, idx=-1):
 		brightness_temps: array of brightness temperatures for each band
 		wn_edges: wavenumber edges used
 	"""
-	#Min and max wavenumbers to look for the Christiansen Feature brightness temperature peak. 
-	wn_min = 900  # cm^-1, cutoff for fitting (same as original function)
-	wn_max = 1700
+	#Indices of min and max wavenumbers to look for the Christiansen Feature brightness temperature peak. 
 	indx1 = np.argmin(np.abs(wn_edges_input - wn_min))
 	indx2 = np.argmin(np.abs(wn_edges_input - wn_max))
 	wn_edges = wn_edges_input[indx1:indx2]  # Use only up to the cutoff wavenumber

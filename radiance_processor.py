@@ -516,7 +516,7 @@ class RadianceProcessor:
                     results['flux_thermal'][obs_idx, time_idx] = flux_th
                     results['flux_visible'][obs_idx, time_idx] = flux_vis
                     # Use surface temperature for brightness temp in two-wave mode
-                    results['brightness_temps'][obs_idx, time_idx] = T_surf_out[t_idx]
+                    results['brightness_temps'][obs_idx, time_idx] = (rad_th*np.pi/(5.6703e-8))**0.25
         
         print(f"Surface radiance calculation completed.")
         return results
