@@ -773,8 +773,13 @@ class Simulator:
 					if(self.cfg.RTE_solver == 'hapke'):
 						source_term,self.phi_vis_prev,self.phi_therm_prev = self.rte_hapke.compute_source(self.T,self.grid.x_RTE,self.grid.x_boundaries,self.phi_vis_prev,self.phi_therm_prev, self.mu, self.F)
 						source_term_vis = np.zeros_like(source_term) #Hapke model source term already includes vis.
+						#get upwards flux
+						fl_up = (self.phi_therm_prev[0]*2 - 0)*np.pi #Substitute the 0 with Q_therm later. 
+						#Hemispherically integrated brightness temperature
+						self.T_surf = (fl_up/self.cfg.sigma)**0.25
 					elif(self.cfg.RTE_solver == 'disort'):
 						source_term,self.flux_up_therm = self.rte_disort.disort_run(self.T,self.mu,self.F)
+						self.T_surf = (self.flux_up_therm[0]/self.cfg.sigma)**0.25 
 						if self.cfg.thermal_evolution_mode in ['two_wave', 'hybrid'] and self.F > 0.001:
 							# Two-wave and hybrid modes: run separate visible solver
 							source_term_vis,self.flux_up_vis = self.rte_disort_vis.disort_run(self.T,self.mu,self.F)
